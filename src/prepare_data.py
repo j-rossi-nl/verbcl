@@ -416,6 +416,7 @@ def parse_args(argstxt=sys.argv[1:]):
     # Sort the big JSON file with all gists by cited_opinion_id
     parser_sort = subparsers.add_parser('sort')
     parser_sort.add_argument('--json')
+    parser_sort.set_defaults(func=sort_gist_json)
 
     return parser.parse_args(argstxt)
 
