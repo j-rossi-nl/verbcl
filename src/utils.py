@@ -5,7 +5,8 @@ import time
 import threading
 import re
 
-from multiprocessing import Pool
+from multiprocessing import Pool, Queue
+from typing import Callable, Iterator, Any, List
 
 
 def multiprocess_courtlistener(process_builder, nbworkers=4, monitoring=True):
@@ -73,3 +74,57 @@ def create_destfilepath(origfile, destpath, addsuffix='', new_extension=None):
         newname = match_extension.sub(r'\g<nam>_{}.{}'.format(addsuffix, new_extension), origfilename)
     destfullpath = os.path.join(destpath, newname)
     return destfullpath
+
+
+def multiprocess_with_queue(worker_fn: Callable[[Queue, Queue], None],
+                            input_iterator_fn: Callable[[], Iterator[Any]],
+                            nb_workers: int,
+                            description: str = 'Process') -> List[Any]:
+    """
+    Another kind of multiprocessing with progress bar. It uses Queue to keep track of progress.
+    The worker is implemented in worker_fn, a function that receives 2 queues, an in_queue and an out_queue. The
+    expected behavior of the worker is: read from in_queue, process the data, put it in out_queue (1 for 1)
+
+    :param worker_fn: the worker function. It gets an in_queue and and out_queue.
+    :param input_iterator_fn: an iterator over input data for the process
+    :param nb_workers: numbers of workers to spawn
+    :param description: The description string for the progress bar
+    :return: Th
+    """
+    # To change a bit from the monitoring system in utils, we implement a queue-based feeder-consumer model
+    # The parent process will  feed data to a 'to do' queue, the workers will read from this queue and feed a 'done'
+    # queue that the parent process reads
+    todo_queue = Queue()
+    done_queue = Queue()
+
+    # Fill in the "to do" queue
+    for x in input_iterator_fn():
+        todo_queue.put(x)
+
+    # Safe to use, as the workers have not started yet
+    nb_inputs = todo_queue.qsize()
+
+    # This is the parent process
+    # Launch the workers
+    pool = Pool(processes=nb_workers,
+                initializer=worker_fn,
+                initargs=(todo_queue, done_queue))
+
+    # Use the "done" queue to monitor process
+    collected_outputs = []
+    with tqdm.tqdm(desc=description, total=nb_inputs) as pbar:
+        # We know how many items we expect
+        for _ in range(nb_inputs):
+            results = done_queue.get(True)
+            collected_outputs.append(results)
+            pbar.update()
+
+    # At this point, all threads are just blocked waiting to read something from the now empty 'to do' queue.
+    assert todo_queue.empty()
+    assert done_queue.empty()
+
+    # Let's terminate the workers
+    pool.terminate()
+    pool.join()
+
+    return collected_outputs
