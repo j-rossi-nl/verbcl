@@ -9,11 +9,13 @@ import sys
 import csv
 import multiprocessing
 import en_core_web_sm
+import pickle
 
 from argparse import ArgumentParser
 from typing import List
 from multiprocessing import Queue
 from bs4 import BeautifulSoup
+from sklearn.feature_extraction.text import TfidfVectorizer, ENGLISH_STOP_WORDS
 
 from utils import multiprocess_courtlistener, create_destfilepath, multiprocess_with_queue
 from gist_extraction import extract_catchphrase
@@ -45,9 +47,10 @@ def gatherjson(jsonfiles, jsondest, remove=True):
     """
     with open(jsondest, 'w') as out:
         for f in jsonfiles:
-            for l in open(f):
-                # Just take care each line terminates with a '\n'
-                out.write(l)
+            with open(f) as js:
+                for line in js:
+                    # Just take care each line terminates with a '\n'
+                    out.write(line)
             out.write('\n')
     if remove:
         for tmpf in jsonfiles:
@@ -127,6 +130,7 @@ def extract_and_save():
 
     def extract_and_save_builder():
         return _args.targzpath, 'tar.gz', _args.dest, 'csv', extract_html
+
     results: List[str] = multiprocess_courtlistener(process_builder=extract_and_save_builder,
                                                     nbworkers=_args.nbworkers)
     if _args.gathercsv is not None:
@@ -169,6 +173,7 @@ def prepare_bert():
 
     def prepare_bert_builder():
         return _args.csvpath, 'csv', _args.dest, 'txt', html_to_text
+
     _ = multiprocess_courtlistener(process_builder=prepare_bert_builder,
                                    nbworkers=_args.nbworkers)
 
@@ -198,6 +203,7 @@ def process_citations(x):
 def extract_citations():
     def extract_citations_builder():
         return _args.csvpath, 'csv', _args.dest, 'csv', process_citations
+
     results = multiprocess_courtlistener(process_builder=extract_citations_builder, nbworkers=_args.nbworkers)
     if _args.gathercsv is not None:
         gathercsv(results, _args.gathercsv, remove=_args.delete)
@@ -225,6 +231,7 @@ def produce_backref(x):
 def backreference():
     def backreference_builder():
         return _args.csvpath, 'csv', _args.dest, 'csv', produce_backref
+
     results = multiprocess_courtlistener(process_builder=backreference_builder, nbworkers=_args.nbworkers)
     if _args.gathercsv is not None:
         gathercsv(results, _args.gathercsv, remove=_args.delete)
@@ -322,6 +329,28 @@ def split_worker(in_queue: Queue, out_queue: Queue) -> None:
         out_queue.put([c['file'] for c in chunks])
 
 
+def tfidf():
+    """
+    Randomly draws a corpus of opinions. Trains a TFIDF Vectorizer on it.
+
+    :return:
+    """
+    backrefs = pd.read_csv(_args.backrefs)
+    draw: pd.DataFrame = backrefs.sample(n=_args.draw)
+
+    def _iter_corpus():
+        for _, r in tqdm.tqdm(draw.iterrows(), total=len(draw)):
+            d = pd.read_csv(os.path.join(_args.csvpath, r['csv_file'])).set_index('opinion_id').fillna('')
+            soup = BeautifulSoup(d.loc[r['opinion_id']]['html_with_citations'], 'html.parser')
+            txt = ' '.join(soup.find_all(text=True))
+            yield txt
+
+    vectorizer = TfidfVectorizer(stop_words=ENGLISH_STOP_WORDS, min_df=5)
+    vectorizer.fit(_iter_corpus())
+
+    pickle.dump(vectorizer, open(_args.save, 'wb'))
+
+
 def split():
     def _opinions_csv_iterator():
         for p in glob.glob(os.path.join(_args.csvpath, '*.csv')):
@@ -333,7 +362,9 @@ def split():
                                 description='Split')
 
 
-def parse_args(argstxt=sys.argv[1:]):
+def parse_args(argstxt=None):
+    if argstxt is None:
+        argstxt = sys.argv[1:]
     parser = ArgumentParser()
     subparsers = parser.add_subparsers(title='Subcommands', description='Valid subcommands',
                                        help='Additional help')
@@ -412,6 +443,14 @@ def parse_args(argstxt=sys.argv[1:]):
     parser_gist.add_argument('--monitor', action='store_true', help='Have a progress bar per worker')
     parser_gist.add_argument('--nbworkers', type=int, default=4, help='Number of parallel workers')
     parser_gist.set_defaults(func=gist)
+
+    # Prepare a TFIDF Vectorizer based on a random sample from the corpus
+    parser_tfidf = subparsers.add_parser('tfidf')
+    parser_tfidf.add_argument('--csvpath', type=str, help='Path to CSV files')
+    parser_tfidf.add_argument('--save', type=str, help='File to pickle the tfidf vectorizer')
+    parser_tfidf.add_argument('--draw', type=int, help='Number of opinions to draw randomly')
+    parser_tfidf.add_argument('--backrefs', type=str, help='Path to backrefs CSV file')
+    parser_tfidf.set_defaults(func=tfidf)
 
     # Sort the big JSON file with all gists by cited_opinion_id
     parser_sort = subparsers.add_parser('sort')
