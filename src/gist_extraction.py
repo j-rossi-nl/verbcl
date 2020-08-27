@@ -9,8 +9,6 @@ from typing import List, Dict, Callable, Optional, Any
 
 from nlp_nonsense import sentence_or_not_spacy
 
-DEBUG = True
-
 LAST_WORDS_EXTRACT = 20
 
 # The SpaCy NLP engine

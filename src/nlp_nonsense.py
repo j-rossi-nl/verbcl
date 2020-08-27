@@ -33,8 +33,7 @@ def _make_basic_features(df: pd.DataFrame) -> pd.DataFrame:
     df['f_nverb'] = df['pos'].map(verb_counter)
 
     # fraction named entities recognized (ner) -- 'O' is not recognized
-    df['f_nner'] = df['ner'].map(lambda ts: sum(1 for t in ts
-                                                if t != 'O'))
+    df['f_nner'] = df['ner'].map(lambda ts: sum(1 for t in ts if t != 'O'))
 
     # Check standard sentence pattern:
     # We might not have the entire sentence, so we check only for the beginning

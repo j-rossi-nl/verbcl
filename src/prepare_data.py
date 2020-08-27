@@ -10,14 +10,15 @@ import csv
 import multiprocessing
 import en_core_web_sm
 import pickle
+import gensim
 
 from argparse import ArgumentParser
-from typing import List
+from typing import List, Dict, Callable
 from multiprocessing import Queue
 from bs4 import BeautifulSoup
 from sklearn.feature_extraction.text import TfidfVectorizer, ENGLISH_STOP_WORDS
 
-from utils import multiprocess_courtlistener, create_destfilepath, multiprocess_with_queue
+from utils import multiprocess_courtlistener, create_destfilepath, multiprocess_with_queue, df_from_file
 from gist_extraction import extract_catchphrase
 
 # The arguments of the command are presented as a global module variable, so all functions require no arguments
@@ -300,6 +301,28 @@ def sort_gist_json():
     d.to_json(_args.json, orient='records', lines=True)
 
 
+def tfidf():
+    """
+    Randomly draws a corpus of opinions. Trains a TFIDF Vectorizer on it.
+
+    :return:
+    """
+    backrefs = pd.read_csv(_args.backrefs)
+    draw: pd.DataFrame = backrefs.sample(n=_args.draw)
+
+    def _iter_corpus():
+        for _, r in tqdm.tqdm(draw.iterrows(), total=len(draw)):
+            d = pd.read_csv(os.path.join(_args.csvpath, r['csv_file'])).set_index('opinion_id').fillna('')
+            soup = BeautifulSoup(d.loc[r['opinion_id']]['html_with_citations'], 'html.parser')
+            txt = ' '.join(soup.find_all(text=True))
+            yield txt
+
+    vectorizer = TfidfVectorizer(stop_words=ENGLISH_STOP_WORDS, min_df=5)
+    vectorizer.fit(_iter_corpus())
+
+    pickle.dump(vectorizer, open(_args.save, 'wb'))
+
+
 def split_worker(in_queue: Queue, out_queue: Queue) -> None:
     """
     Get each CSV file and split it into smaller files, each with max args.size number of records
@@ -329,28 +352,6 @@ def split_worker(in_queue: Queue, out_queue: Queue) -> None:
         out_queue.put([c['file'] for c in chunks])
 
 
-def tfidf():
-    """
-    Randomly draws a corpus of opinions. Trains a TFIDF Vectorizer on it.
-
-    :return:
-    """
-    backrefs = pd.read_csv(_args.backrefs)
-    draw: pd.DataFrame = backrefs.sample(n=_args.draw)
-
-    def _iter_corpus():
-        for _, r in tqdm.tqdm(draw.iterrows(), total=len(draw)):
-            d = pd.read_csv(os.path.join(_args.csvpath, r['csv_file'])).set_index('opinion_id').fillna('')
-            soup = BeautifulSoup(d.loc[r['opinion_id']]['html_with_citations'], 'html.parser')
-            txt = ' '.join(soup.find_all(text=True))
-            yield txt
-
-    vectorizer = TfidfVectorizer(stop_words=ENGLISH_STOP_WORDS, min_df=5)
-    vectorizer.fit(_iter_corpus())
-
-    pickle.dump(vectorizer, open(_args.save, 'wb'))
-
-
 def split():
     def _opinions_csv_iterator():
         for p in glob.glob(os.path.join(_args.csvpath, '*.csv')):
@@ -360,6 +361,69 @@ def split():
                                 input_iterator_fn=_opinions_csv_iterator,
                                 nb_workers=_args.nbworkers,
                                 description='Split')
+
+
+def summarize_textrank_worker(in_queue: Queue, out_queue: Queue) -> None:
+    """
+    Applies textrank to summarize a collection of texts
+    """
+    while True:
+        x: Dict = in_queue.get()
+        uuid: int = x['uuid']
+        text: str = x['text']
+        summary: str = gensim.summarization.summarizer.summarize(text, word_count=_args.nbwords)
+
+        out_queue.put({'opinion_id': uuid, 'summary': summary})
+
+
+def opinion_summarize():
+    """
+    Uses all texts from the CSV file args.texts (column args.tag), summarize acording to args.method and outputs a
+    CSV file with fields 'opinion_id' and 'summary'
+    """
+    method_name_2_func: Dict[str, Callable[[Queue, Queue], None]] = {
+        'textrank': summarize_textrank_worker,
+    }
+
+    def _opinions_text_iterator():
+        d = df_from_file(_args.texts).set_index('opinion_id')
+        for uuid, data in d.iterrows():
+            yield {'uuid': uuid, 'text': data[_args.tag]}
+
+    results = multiprocess_with_queue(worker_fn=method_name_2_func[_args.method],
+                                      input_iterator_fn=_opinions_text_iterator,
+                                      nb_workers=_args.nbworkers,
+                                      description=_args.method)
+
+    df = pd.DataFrame(results, columns=['opinion_id', 'summary'])
+    df.to_csv(_args.dest, index=False)
+
+
+def gists_summarize():
+    """
+    Uses all texts from the CSV file args.texts (column args.tag), summarize acording to args.method and outputs a
+    CSV file with fields 'opinion_id' and 'summary'
+    """
+    method_name_2_func: Dict[str, Callable[[Queue, Queue], None]] = {
+        'textrank': summarize_textrank_worker,
+    }
+
+    def _opinions_text_iterator():
+        # Each cited opinion has many gists, we want to merge them as a text to summarize
+        d = df_from_file(_args.texts)
+        groups = d.groupby(_args.uuid)
+
+        # Join together all extracted gists
+        for uuid, gists in groups:
+            yield {'uuid': uuid, 'text': ' . '.join(gists[_args.tag])}
+
+    results = multiprocess_with_queue(worker_fn=method_name_2_func[_args.method],
+                                      input_iterator_fn=_opinions_text_iterator,
+                                      nb_workers=_args.nbworkers,
+                                      description=_args.method)
+
+    df = pd.DataFrame(results, columns=['opinion_id', 'summary'])
+    df.to_csv(_args.dest, index=False)
 
 
 def parse_args(argstxt=None):
@@ -456,6 +520,27 @@ def parse_args(argstxt=None):
     parser_sort = subparsers.add_parser('sort')
     parser_sort.add_argument('--json')
     parser_sort.set_defaults(func=sort_gist_json)
+
+    # Summarize each opinion
+    parser_opsum = subparsers.add_parser('opinion_summary')
+    parser_opsum.add_argument('--texts', type=str, help='Path to the CSV file with all texts')
+    parser_opsum.add_argument('--tag', type=str, default='text', help='Column name for the text')
+    parser_opsum.add_argument('--dest', type=str, help='Path to the result CSV file')
+    parser_opsum.add_argument('--method', type=str, choices=['textrank'], help='Summarization technic')
+    parser_opsum.add_argument('--nbwords', type=int, default=200)
+    parser_opsum.add_argument('--nbworkers', type=int, help='Number of parallel workers')
+    parser_opsum.set_defaults(func=opinion_summarize)
+
+    # Summarize each opinion from the gists
+    parser_gisum = subparsers.add_parser('gists_summary')
+    parser_gisum.add_argument('--texts', type=str, help='Path to the CSV file with all texts')
+    parser_gisum.add_argument('--tag', type=str, default='text', help='Column name for the text')
+    parser_gisum.add_argument('--uuid', type=str, default='text', help='Column name for the UUID')
+    parser_gisum.add_argument('--dest', type=str, help='Path to the result CSV file')
+    parser_gisum.add_argument('--method', type=str, choices=['textrank'], help='Summarization technic')
+    parser_gisum.add_argument('--nbwords', type=int, default=200)
+    parser_gisum.add_argument('--nbworkers', type=int, help='Number of parallel workers')
+    parser_gisum.set_defaults(func=gists_summarize)
 
     return parser.parse_args(argstxt)
 

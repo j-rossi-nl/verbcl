@@ -4,6 +4,7 @@ import tqdm
 import time
 import threading
 import re
+import pandas as pd
 
 from multiprocessing import Pool, Queue
 from typing import Callable, Iterator, Any, List
@@ -128,3 +129,18 @@ def multiprocess_with_queue(worker_fn: Callable[[Queue, Queue], None],
     pool.join()
 
     return collected_outputs
+
+
+def df_from_file(f_path: str) -> pd.DataFrame:
+    """
+    Builds a dataframe from a file.
+
+    :param f_path:
+    :return:
+    """
+    if f_path.endswith('json'):
+        return pd.read_json(f_path, orient='records', lines=True)
+    elif f_path.endswith('csv'):
+        return pd.read_csv(f_path)
+    else:
+        return None
