@@ -10,14 +10,14 @@ import logging
 
 from multiprocessing import Queue
 from transformers import BertTokenizer, BertModel
-from argparse import ArgumentParser
+from argparse import ArgumentParser, Namespace
 from typing import Dict
 from sklearn.feature_extraction.text import TfidfVectorizer
 
 from utils import multiprocess_with_queue
 
 # The arguments of the command are presented as a global module variable, so all functions require no arguments
-_args = None
+_args: Namespace = Namespace()
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)

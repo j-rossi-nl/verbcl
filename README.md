@@ -17,7 +17,7 @@ The pipeline is as follows:
     1. CSV files are in `cl_work/00_csv`    
     1. Command: 
     ```bash
-    python prepare_data.py targztocsv --targzpath /ivi/ilps/personal/jrossi/COURT_LISTENER/opinions --dest /ivi/ilps/personal/jrossi/cl_work/00_csv --nbworkers=N
+    python prepare_data.py extract --targzpath /ivi/ilps/personal/jrossi/COURT_LISTENER/opinions --dest /ivi/ilps/personal/jrossi/cl_work/00_json --format json --nbworkers=N
     ```
    
 1. To prepare text for BERT pre-training:
