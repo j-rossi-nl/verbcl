@@ -47,13 +47,13 @@ def _nlp_extract(txt: str) -> Optional[str]:
     # For example: J could ask for ... against ... as in G v R <citation> --> full sentence
     # Or: J could ask ... as "... ... ..." in G vR <citation>             --> only what's in quotes
     m = _quote_in_sentence.match(candidate_sentence)
-    op_gist = m.group('quote') if m is not None else candidate_sentence.strip()
-    return op_gist
+    op_anchor = m.group('quote') if m is not None else candidate_sentence.strip()
+    return op_anchor
 
 
 def _last_extract(txt: str) -> str:
-    op_gist = ' '.join(txt.split()[-LAST_WORDS_EXTRACT:])
-    return op_gist
+    op_anchor = ' '.join(txt.split()[-LAST_WORDS_EXTRACT:])
+    return op_anchor
 
 
 _methods_fn: Dict[str, Callable[[str], Optional[str]]] = {
@@ -79,10 +79,10 @@ def clean_html(html: BeautifulSoup) -> BeautifulSoup:
     return html
 
 
-def extract_catchphrase(html_with_citations: str,
-                        method: str) -> List[Dict[str, Any]]:
+def extract_anchors(html_with_citations: str,
+                    method: str) -> List[Dict[str, Any]]:
     """
-    Extract for each citation, the 'GIST' of it, which is the catchphrase that introduces the citED opinion
+    Extract for each citation, the 'anchor' of it, which is the anchor that introduces the citED opinion
     in the citING opinion. Each cited opinion is introduced by a sentence that underlines what from the cited
     opinion is an argument for the citing opinion.
 
@@ -94,7 +94,7 @@ def extract_catchphrase(html_with_citations: str,
     html = BeautifulSoup(html_with_citations, 'html.parser')
 
     processed_ids = []
-    opinion_gists = []
+    opinion_anchors = []
     for cited in html.find_all('span', **bs4_citation_args):
         cited: bs4.element.Tag
 
@@ -127,8 +127,8 @@ def extract_catchphrase(html_with_citations: str,
             continue
 
         _call = _methods_fn[method]
-        op_gist = _call(cumulated_txt)
-        if op_gist is not None:
-            opinion_gists.append({'cited_opinion_id': cited_opinion_id, 'gist': op_gist})
+        op_anchor = _call(cumulated_txt)
+        if op_anchor is not None:
+            opinion_anchors.append({'cited_opinion_id': cited_opinion_id, 'anchor': op_anchor})
 
-    return opinion_gists
+    return opinion_anchors

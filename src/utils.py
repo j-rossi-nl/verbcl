@@ -2,72 +2,43 @@ import tqdm
 import threading
 import random
 import string
+import functools
+
 import pyarrow.dataset as ds
 import pyarrow.parquet as pq
 
 from multiprocessing import Pool, Queue
-from typing import Callable, Iterator, Any, List
+from typing import Callable, Iterator, Any, List, Tuple
 
 
-def multiprocess_with_queue(worker_fn: Callable[[Queue, Queue], None],
-                            input_iterator_fn: Callable[[], Iterator[Any]],
-                            nb_workers: int,
-                            description: str = 'Process') -> List[Any]:
+def queue_worker(func):
     """
-    Another kind of multiprocessing with progress bar. It uses Queue to keep track of progress.
-    The worker is implemented in worker_fn, a function that receives 2 queues, an in_queue and an out_queue. The
-    expected behavior of the worker is: read from in_queue, process the data, put it in out_queue (1 for 1)
+    Decorator for multiprocess workers.
 
-    :param worker_fn: the worker function. It gets an in_queue and and out_queue.
-    :param input_iterator_fn: an iterator over input data for the process
-    :param nb_workers: numbers of workers to spawn
-    :param description: The description string for the progress bar
-    :return: list of results
+    :param func: signature (in: Any) -> int: processes one item, return one integer.
+    :return: a worker function, with signature (in_queue: Queue, out_queue: Queue) -> None
     """
-    # To change a bit from the monitoring system in utils, we implement a queue-based feeder-consumer model
-    # The parent process will  feed data to a 'to do' queue, the workers will read from this queue and feed a 'done'
-    # queue that the parent process reads
-    todo_queue = Queue()
-    done_queue = Queue()
+    @functools.wraps(func)
+    def wrapper(in_queue: Queue, out_queue: Queue):
+        """
 
-    # Fill in the "to do" queue
-    for x in input_iterator_fn():
-        todo_queue.put(x)
+        :param in_queue: tasks to do
+        :param out_queue: done tasks
+        :return:
+        """
+        while True:
+            x = in_queue.get(True)
+            out = func(x)
+            out_queue.put(out)
 
-    # Safe to use, as the workers have not started yet
-    nb_inputs = todo_queue.qsize()
-
-    # This is the parent process
-    # Launch the workers
-    pool = Pool(processes=nb_workers,
-                initializer=worker_fn,
-                initargs=(todo_queue, done_queue))
-
-    # Use the "done" queue to monitor process
-    collected_outputs = []
-    with tqdm.tqdm(desc=description, total=nb_inputs) as pbar:
-        # We know how many items we expect
-        for _ in range(nb_inputs):
-            results = done_queue.get(True)
-            if results is not None:
-                collected_outputs.append(results)
-            pbar.update()
-
-    # At this point, all threads are just blocked waiting to read something from the now empty 'to do' queue.
-    assert todo_queue.empty()
-    assert done_queue.empty()
-
-    # Let's terminate the workers
-    pool.terminate()
-    pool.join()
-
-    return collected_outputs
+    return wrapper
 
 
-def multiprocess_dataset(worker_fn: Callable[[Queue, Queue], None],
-                         input_dataset_path: str,
-                         nb_workers: int,
-                         description: str = 'Process') -> None:
+def multiprocess(worker_fn: Callable[[Queue, Queue], None],
+                 input_iterator_fn: Callable[[], Iterator[Any]],
+                 total: int,
+                 nb_workers: int,
+                 description: str = 'Process') -> None:
     """
     Another kind of multiprocessing with progress bar. It uses Queue to keep track of progress.
     It goes over a full pyarrrow dataset, ie a folder with Parquet files
@@ -75,8 +46,9 @@ def multiprocess_dataset(worker_fn: Callable[[Queue, Queue], None],
     expected behavior of the worker is: read from in_queue, process the data, put it in out_queue (1 for 1)
 
     :param worker_fn: the worker function. It gets an in_queue and and out_queue.
-    :param input_dataset_path: the dataset to process (path to the dataset folder_
-    :param nb_workers: numbers of workers to spawn
+    :param input_iterator_fn: an iterator over input data for the process
+    :param total: indicates what is the end result when summing all returned values of the decorated worker
+    :param nb_workers: Number of parallel workers
     :param description: The description string for the progress bar
     """
 
@@ -85,27 +57,22 @@ def multiprocess_dataset(worker_fn: Callable[[Queue, Queue], None],
     todo_queue = Queue(128)   # Not too big to avoid memory overload
     done_queue = Queue()
 
-    dataset: ds.Dataset = ds.dataset(input_dataset_path)
-    dataset: ds.FileSystemDataset  # We know the actual subclass
-    nb_rows = sum(pq.read_metadata(f).num_rows for f in dataset.files)
-
     # This is the parent process
     # Launch the workers
     pool = Pool(processes=nb_workers,
                 initializer=worker_fn,
                 initargs=(todo_queue, done_queue))
 
-    # Fill in the "to do" queue
+    # Fill in the "to do" queue in a separate thread
     def _fill_todo_queue():
-        for scan_task in dataset.scan(batch_size=1024):
-            for batch in scan_task.execute():
-                todo_queue.put(batch)  # Block if queue is full until a slot is free (no timeout)
+        for x in input_iterator_fn():
+            todo_queue.put(x)
 
     fillin = threading.Thread(target=_fill_todo_queue)
     fillin.start()
 
     # Use the "done" queue to monitor process
-    with tqdm.tqdm(desc=description, total=nb_rows) as pbar:
+    with tqdm.tqdm(desc=description, total=total) as pbar:
         while pbar.n < pbar.total:
             results: int = done_queue.get(True)
             pbar.update(n=results)
@@ -120,7 +87,23 @@ def multiprocess_dataset(worker_fn: Callable[[Queue, Queue], None],
     fillin.join()
 
 
+def parquet_dataset_iterator(dataset: ds.FileSystemDataset) -> Tuple[Callable[[], Iterator[Any]], int]:
+    def _iterator():
+        for scan_task in dataset.scan(batch_size=1024):
+            for batch in scan_task.execute():
+                yield batch
+
+    nb_rows = sum(pq.read_metadata(f).num_rows for f in dataset.files)
+    return _iterator, nb_rows
+
+
+def file_list_iterator(files: List[str]) -> Tuple[Callable[[], Iterator[Any]], int]:
+    def _iterator():
+        for f in files:
+            yield f
+
+    return _iterator, len(files)
+
+
 def random_name(n=6):
     return ''.join((random.choice(string.ascii_letters + string.digits) for _ in range(n)))
-
-
