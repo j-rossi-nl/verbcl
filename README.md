@@ -1,5 +1,5 @@
-# lawinsider
-Working with LawInsider dataset
+# Court Listener
+Working with CourtListener dataset
 
 Pipeline :
 Original dataset is available as *.tar.gz files : 
