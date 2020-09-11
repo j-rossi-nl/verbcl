@@ -11,17 +11,18 @@ import logging
 import numpy as np
 import requests
 import datetime
+import bs4
 
 from argparse import ArgumentParser, Namespace
-from bs4 import BeautifulSoup
 from pyspin.spin import make_spin, Default
-from typing import Any
+from typing import Any, Callable
 from tqdm import tqdm
 
 from utils import multiprocess, queue_worker
 from utils import parquet_dataset_iterator, file_list_iterator
 from utils import random_name
-from anchors import extract_anchors
+from utils import opinions_in_arrowbatch, Opinion, citation_to_jsonl
+from anchors import extract_anchors, methods_fn
 
 # The arguments of the command are presented as a global module variable, so all functions require no arguments
 _args: Namespace = Namespace()
@@ -79,11 +80,11 @@ def create_opinion_dataset():
     """
     logging.info('Converting from CourtListener format to Parquet Dataset')
     logging.info(f'Extracting Tags: {" / ".join(_args.tags)}')
-    logging.info(f'From folder: {_args.targzpath}')
+    logging.info(f'From folder: {_args.path}')
     logging.info(f'To folder: {_args.dest}')
     os.makedirs(_args.dest, exist_ok=True)
 
-    targz_files = glob.glob(os.path.join(_args.targzpath, '*.tar.gz'))
+    targz_files = glob.glob(os.path.join(_args.path, '*.tar.gz'))
     iterator, nb_files = file_list_iterator(targz_files)
     multiprocess(worker_fn=worker_extract_opinion,
                  input_iterator_fn=iterator,
@@ -106,7 +107,7 @@ def _transform_parquet_dataset(worker_fn):
                  input_iterator_fn=iterator,
                  total=nb_rows,
                  nb_workers=_args.num_workers,
-                 description='Map citation network')
+                 description='Progress')
 
 
 @queue_worker
@@ -117,21 +118,14 @@ def worker_extract_citation_map(x: pa.RecordBatch) -> int:
     :param x: batch of opinions to parse
     :return: number of processed opinions
     """
-    d = x.to_pydict()
-
     citations = []
-    for citing_opinion_id, opinion_html in zip(d['opinion_id'], d['html_with_citations']):
-        citing_opinion_id = citing_opinion_id
-        try:
-            bs = BeautifulSoup(opinion_html, 'html.parser')
-        except TypeError:
-            continue
-        search = {'class': 'citation', 'data-id': True}
-        cited_opinions = set([int(x['data-id']) for x in bs.find_all('span', **search)])
-        citations.extend([[citing_opinion_id, x] for x in cited_opinions])
+    for opinion in opinions_in_arrowbatch(x):
+        citing_opinion_id = opinion.opinion_id
+        cited_opinions = set(d['cited_opinion_id'] for d in opinion.citations())
+        citations.extend([{'citing_opinion_id': citing_opinion_id, 'cited_opinion_id': x} for x in cited_opinions])
 
-    df = pd.DataFrame(citations, columns=['citing_opinion_id', 'cited_opinion_id'])
-    for c in ['citing_opinion_id', 'cited_opinion_id']:
+    df = pd.DataFrame(citations)
+    for c in df.columns:
         df[c] = df[c].apply(pd.to_numeric)
 
     if len(df) > 0:
@@ -157,12 +151,11 @@ def worker_extract_anchor(x: pa.RecordBatch) -> int:
     :param x: a batch (pyarrow.RecordBatch)
     :return: number of rows in the batch (int)
     """
-    d = x.to_pydict()
-
     opinion_anchors = []
-    for citing_opinion_id, opinion_html in zip(d['opinion_id'], d['html_with_citations']):
-        op_anchors = extract_anchors(opinion_html, method=_args.method)
-        opinion_anchors.extend([[citing_opinion_id, g['cited_opinion_id'], g['anchor']] for g in op_anchors])
+    for opinion in opinions_in_arrowbatch(x):
+        opinion: Opinion
+        op_anchors = extract_anchors(opinion, method=_args.method)
+        opinion_anchors.extend([[opinion.opinion_id, g['cited_opinion_id'], g['anchor']] for g in op_anchors])
 
     # Wrap-up, save to PARQUET file and return the number of processed rows
     df = pd.DataFrame(opinion_anchors, columns=['citing_opinion_id', 'cited_opinion_id', 'anchor'])
@@ -180,21 +173,33 @@ def create_anchor_dataset():
 
 
 @queue_worker
-def worker_summarize_textrank(x: pa.RecordBatch) -> int:
+def worker_jsonl_for_annotation(x: pa.RecordBatch) -> int:
     """
-    Applies textrank to summarize a collection of texts
+    Extract the text to be annotated for anchor extraction.
     """
-    # TODO
-    return 0
+
+    def _jsonl():
+        for opinion in opinions_in_arrowbatch(x):
+            opinion: Opinion
+            for citation in opinion.citations(return_tag=True):
+                tag: bs4.Tag = citation['tag']
+                jsonl = citation_to_jsonl(tag, _args.max_words_extract)
+                yield jsonl
+
+    file_out = os.path.join(_args.dest, f'{random_name()}.json')
+    with open(file_out, 'w', encoding='utf-8') as out:
+        out.write('\n'.join(j for j in _jsonl()))
+
+    return x.num_rows
 
 
-def create_opinion_summary_dataset():
+def create_annotation_dataset():
     """
-    Uses all texts from the CSV file args.texts (column args.tag), summarize acording to args.method and outputs a
-    CSV file with fields 'opinion_id' and 'summary'
+    Uses an opinion dataset and create the text snippets that will be manually annotated.
+    The output is a collection of TXT files.
     """
-    # TODO
-    pass
+    logging.info(f'Create JSONL for ANNOTATIONS')
+    _transform_parquet_dataset(worker_jsonl_for_annotation)
 
 
 def create_sample_dataset():
@@ -222,7 +227,8 @@ def create_sample_dataset():
     def _collect():
         scan_tasks = dataset.scan(filter=ds.field('opinion_id').isin(sample_opinion_ids))
         batches = sum((list(s.execute()) for s in scan_tasks), [])
-        t = pa.Table.from_batches(batches=batches)        # Discard the warning 'parameter self unfilled'
+        # noinspection PyArgumentList
+        t = pa.Table.from_batches(batches=batches)  # incorrect warning about this call
         return t
 
     table = _collect()
@@ -270,6 +276,19 @@ def parse_args(argstxt=None):
     subparsers = parser.add_subparsers(title='Subcommands', description='Valid subcommands',
                                        help='Additional help')
 
+    def default_parser(name: str,
+                       description: str,
+                       func: Callable[[None], None],
+                       parallel: bool = True) -> ArgumentParser:
+        # All parsers have a lot of common arguments
+        new_parser = subparsers.add_parser(name=name, description=description)
+        new_parser.add_argument('--path', type=str, help='SOURCE dataset')
+        new_parser.add_argument('--dest', type=str, help='DESTINATION dataset')
+        if parallel:
+            new_parser.add_argument('--num-workers', type=int, default=4, help='Number of parallel workers')
+        new_parser.set_defaults(func=func)
+        return new_parser
+
     # Download the Opinion dataset from CourtListener
     # Unpack it if requested
     parser_download = subparsers.add_parser('download')
@@ -278,48 +297,59 @@ def parse_args(argstxt=None):
     parser_download.set_defaults(func=download_courtlistener_opinions_bulk)
 
     # From CourtListener to Parquet dataset
-    parser_tocsv = subparsers.add_parser('opinion')
-    parser_tocsv.add_argument("--targzpath", type=str, help="The path to the folder with all *.tar.gz "
-                                                            "files to be decompressed")
-    parser_tocsv.add_argument('--dest', type=str, help='Destination folder for the PARQUET files')
-    parser_tocsv.add_argument('--tags', nargs='+', help='List of tags to get for each opinion JSON file '
-                                                        'in each tar,gz file in folder')
-    parser_tocsv.add_argument("--num-workers", type=int, default=4, help="Number of parallel workers")
-    parser_tocsv.set_defaults(func=create_opinion_dataset)
+    parser_to_parquet = default_parser(
+        name='opinion',
+        description='Convert the original dataset (a collection of tar.gz files in the '
+                    'PATH folder), into a PARQUET dataset (multiple PARQUET files in the'
+                    ' DEST folder',
+        func=create_opinion_dataset
+    )
+    parser_to_parquet.add_argument('--tags', nargs='+', help='List of tags to get for each opinion JSON file '
+                                                             'in each tar,gz file in folder')
 
     # Random sample from the opinion dataset
-    parser_sample = subparsers.add_parser('sample')
-    parser_sample.add_argument('--path', type=str, help='Path to the OPINION dataset folder')
-    parser_sample.add_argument('--dest', type=str, help='Destination folder for SAMPLE dataset')
+    parser_sample = default_parser(
+        name='sample',
+        description='Pick a random sample of the opinions from the pool of all the opinions in the PARQUET dataset '
+                    'in folder PATH. The sample is saved as a PARQUET dataset in folder DEST.',
+        parallel=False,
+        func=create_sample_dataset
+    )
     parser_sample.add_argument('--citation-map', type=str, help='CSV File of the citation map')
     parser_sample.add_argument('--num-samples', type=int, default=10000, help='Number of samples')
-    parser_sample.set_defaults(func=create_sample_dataset)
 
     # Extract all ANCHORS from all citations
-    parser_anchor = subparsers.add_parser('anchor')
-    parser_anchor.add_argument('--method', type=str, choices=['nlp', 'last'], default='last',
+    parser_anchor = default_parser(
+        name='anchor',
+        description='Extract all citation anchors from the PARQUET opinion located in folder PATH. The generated '
+                    'dataset has one sample per citation, with fields citing_opinion_id, cited_opinion_id, anchor. '
+                    'The generated dateset is saved as PARQUET dataset in the folder DEST.',
+        func=create_anchor_dataset
+    )
+    parser_anchor.add_argument('--method', type=str, choices=methods_fn.keys(), default='last',
                                help='Select the method to extract anchors.')
-    parser_anchor.add_argument('--path', type=str, help='Path to the OPINION dataset folder')
-    parser_anchor.add_argument('--dest', type=str, help='Destination folder for ANCHOR dataset')
-    parser_anchor.add_argument('--num-workers', type=int, default=4, help='Number of parallel workers')
-    parser_anchor.set_defaults(func=create_anchor_dataset)
 
-    # Create a CSV file to track all couples of (citing, cited) opinions
-    parser_citations = subparsers.add_parser('citation-map')
-    parser_citations.add_argument('--path', type=str, help='Path to the Opinion PARQUET dataset')
-    parser_citations.add_argument('--dest', type=str, help='Destination folder for PARQUET files')
-    parser_citations.add_argument('--num-workers', type=int, default=4, help='Number of parallel workers')
-    parser_citations.set_defaults(func=create_citation_map)
+    # Create a dataset of citing / cited opinion
+    _ = default_parser(
+        name='citation-map',
+        description='Extract all citations from the PARQUET dataset of opinions located in PATH, and generate a '
+                    'dataset of pairs citing_opinion / cited_opinion. The generated dataset is saved as a PARQUET'
+                    'dataset in the folder DEST.',
+        func=create_citation_map
+    )
 
-    # Summarize each opinion
-    parser_opsum = subparsers.add_parser('opinion-summary')
-    parser_opsum.add_argument('--path', type=str, help='Path to the OPINION Parquet dataset')
-    parser_opsum.add_argument('--dest', type=str, help='Path to the OPINION SUMMARY Parquet dataset folder')
-    parser_opsum.add_argument('--method', type=str, choices=['textrank'], help='Summarization technic')
-    parser_opsum.add_argument('--num-words', type=int, default=200, help='Target length for the summary, '
-                                                                         'in number of words')
-    parser_opsum.add_argument('--num-workers', type=int, help='Number of parallel workers')
-    parser_opsum.set_defaults(func=create_opinion_summary_dataset)
+    # Produce data for annotation
+    parser_doccano = default_parser(
+        name='doccano',
+        description='From an opinion PARQUET dataset located in folder PATH, extract for each citation a snippet of'
+                    'text surrounding the citation for manual anchor annotation. The text snippets are saved as a '
+                    'collection of JSONL files in folder DEST. Each file is named '
+                    '<citing_opinion_id>_<cited_opinion_id>_<seq_num>.json',
+
+        func=create_annotation_dataset
+    )
+    parser_doccano.add_argument('--max-words-extract', type=int, default=100, help='Limit the text around the citation '
+                                                                                   'itself to a number of characters')
 
     return parser.parse_args(argstxt)
 
