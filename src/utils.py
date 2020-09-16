@@ -6,11 +6,13 @@ import functools
 import pyarrow as pa
 import bs4
 import json
+import copy
+import re
 
 import pyarrow.dataset as ds
 import pyarrow.parquet as pq
 from multiprocessing import Pool, Queue
-from typing import Callable, Iterator, Any, List, Tuple, Dict
+from typing import Callable, Iterator, Any, List, Tuple, Dict, Optional, Union
 from bs4 import BeautifulSoup
 
 CITATION_TAG = 'CITATION'
@@ -29,6 +31,13 @@ class Opinion:
         self.raw_text = self.soup.get_text()
         self.num_words = len(self.raw_text.split())
 
+        # MARK = replace all citations with easily findable strings in the raw text
+        self.marked_soup = copy.copy(self.soup)
+        for c in self.marked_soup.find_all('span', **Opinion.bs4_citation_args):
+            c.string = f'MARK_FOR_CITATION_{random_name(8)}'
+        self.marked_text = clean_str(self.marked_soup.get_text())
+        self.mark_regex = re.compile(r'MARK_FOR_CITATION_\w{8}')
+
     def citations(self, return_tag: bool = False) -> Iterator[Dict[str, Any]]:
         """
         An iterator to go through all the citations in the opinion. Each iteration will yield a dict with the keys
@@ -43,8 +52,39 @@ class Opinion:
                 data['tag'] = s
             yield data
 
+    def to_jsonl(self, max_words_before_after: Optional[int] = None) -> Iterator[str]:
+        """
+        For each citation in an opinion, generate the snippet of text that will be used by annotators.
+        It is returned in JSONL format, and the citation itself is marked as 'CITATION'.
+
+        :param max_words_before_after: number of words of the text before and after the tag to include for the annotator.
+        If None, then the whole text is returned
+        :return: Iterator that yields JSONL strings
+        """
+        for mark in self.mark_regex.finditer(self.marked_text):
+            mark: re.Match
+            start, end = mark.span()
+            before_citation_txt = self.marked_text[:start]
+            citation_txt = self.marked_text[start:end]
+            after_citation_txt = self.marked_text[end:]
+
+            if max_words_before_after is not None:
+                before_citation_txt = ' '.join(before_citation_txt.split()[-max_words_before_after:])
+                after_citation_txt = ' '.join(after_citation_txt.split()[:max_words_before_after])
+
+            full_txt = ''.join([before_citation_txt, citation_txt, after_citation_txt])
+            start_citation = len(before_citation_txt)
+            end_citation = start_citation + len(citation_txt)
+
+            yield json.dumps({'text': full_txt, 'labels': [[start_citation, end_citation, CITATION_TAG]]})
+
     def __len__(self):
         return self.num_words
+
+
+chars_to_clean = str.maketrans('', '', '\f\t\n')
+def clean_str(s: str) -> str:
+    return s.translate(chars_to_clean).strip()
 
 
 def queue_worker(func):
@@ -173,45 +213,3 @@ def opinions_in_arrowbatch(x: pa.RecordBatch) -> Iterator[Opinion]:
     d = x.to_pydict()
     for citing_opinion_id, opinion_html in zip(d['opinion_id'], d['html_with_citations']):
         yield Opinion(opinion_id=citing_opinion_id, opinion_html=opinion_html)
-
-
-def citation_to_jsonl(x: bs4.Tag, max_words_before_after: int) -> str:
-    """
-    From a citation in an opinion, generate the snippet of text that will be used by annotators.
-    It is returned in JSONL format, and the citation itself is marked as 'CITATION'.
-    It is assumed the given tag is actually a citation from an opinion.
-
-    :param x:  a tag 'citation' in an opinion
-    :return: JSONL string
-    """
-
-    def concatenate_txts(tags):
-        def _tags_iter():
-            for s in tags:
-                # s will be either a NavigableString or a Tag
-                if isinstance(s, bs4.NavigableString):
-                    s: bs4.NavigableString
-                    s_txt = str(s)
-                elif isinstance(s, bs4.Tag):
-                    s: bs4.Tag
-                    s_txt = s.get_text()
-                else:
-                    # Well well, what do we have here??
-                    s_txt = ''
-                yield s_txt
-
-        return ''.join(t for t in _tags_iter())
-
-    txts = list(map(concatenate_txts, [x.previous_siblings, [x], x.next_siblings]))
-    before_citation_txt, citation_txt, after_citation_txt = txts
-
-    # Limit to a maximum number of characters before and after the citation
-    before_citation_txt = ' '.join(before_citation_txt.split(' ')[-max_words_before_after:]).replace('\n', ' ').strip()
-    after_citation_txt = ' '.join(after_citation_txt.split(' ')[:max_words_before_after]).replace('\n', ' ').strip()
-
-    start_citation = len(before_citation_txt)
-    end_citation = start_citation + len(citation_txt)
-
-    full_text = ''.join([before_citation_txt, citation_txt, after_citation_txt])
-    data = {'text': full_text, 'labels': [[start_citation, end_citation, CITATION_TAG]]}
-    return json.dumps(data)

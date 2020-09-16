@@ -11,7 +11,6 @@ import logging
 import numpy as np
 import requests
 import datetime
-import bs4
 
 from argparse import ArgumentParser, Namespace
 from pyspin.spin import make_spin, Default
@@ -21,7 +20,7 @@ from tqdm import tqdm
 from utils import multiprocess, queue_worker
 from utils import parquet_dataset_iterator, file_list_iterator
 from utils import random_name
-from utils import opinions_in_arrowbatch, Opinion, citation_to_jsonl
+from utils import opinions_in_arrowbatch, Opinion
 from anchors import extract_anchors, methods_fn
 
 # The arguments of the command are presented as a global module variable, so all functions require no arguments
@@ -177,18 +176,10 @@ def worker_jsonl_for_annotation(x: pa.RecordBatch) -> int:
     """
     Extract the text to be annotated for anchor extraction.
     """
-
-    def _jsonl():
-        for opinion in opinions_in_arrowbatch(x):
-            opinion: Opinion
-            for citation in opinion.citations(return_tag=True):
-                tag: bs4.Tag = citation['tag']
-                jsonl = citation_to_jsonl(tag, _args.max_words_extract)
-                yield jsonl
-
     file_out = os.path.join(_args.dest, f'{random_name()}.json')
     with open(file_out, 'w', encoding='utf-8') as out:
-        out.write('\n'.join(j for j in _jsonl()))
+        out.write('\n'.join(j for op in opinions_in_arrowbatch(x)
+                            for j in op.to_jsonl(max_words_before_after=_args.max_words_extract)))
 
     return x.num_rows
 
@@ -345,11 +336,10 @@ def parse_args(argstxt=None):
                     'text surrounding the citation for manual anchor annotation. The text snippets are saved as a '
                     'collection of JSONL files in folder DEST. Each file is named '
                     '<citing_opinion_id>_<cited_opinion_id>_<seq_num>.json',
-
         func=create_annotation_dataset
     )
-    parser_doccano.add_argument('--max-words-extract', type=int, default=100, help='Limit the text around the citation '
-                                                                                   'itself to a number of characters')
+    parser_doccano.add_argument('--max-words-extract', type=int, help='Limit the text around the citation '
+                                                                      'itself to a number of characters')
 
     return parser.parse_args(argstxt)
 
