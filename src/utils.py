@@ -12,7 +12,7 @@ import re
 import pyarrow.dataset as ds
 import pyarrow.parquet as pq
 from multiprocessing import Pool, Queue
-from typing import Callable, Iterator, Any, List, Tuple, Dict, Optional, Union
+from typing import Callable, Iterator, Any, List, Tuple, Dict, Optional
 from bs4 import BeautifulSoup
 
 CITATION_TAG = 'CITATION'
@@ -57,7 +57,8 @@ class Opinion:
         For each citation in an opinion, generate the snippet of text that will be used by annotators.
         It is returned in JSONL format, and the citation itself is marked as 'CITATION'.
 
-        :param max_words_before_after: number of words of the text before and after the tag to include for the annotator.
+        :param max_words_before_after: number of words of the text before and after the tag to include for the
+        annotator.
         If None, then the whole text is returned
         :return: Iterator that yields JSONL strings
         """
@@ -69,8 +70,8 @@ class Opinion:
             after_citation_txt = self.marked_text[end:]
 
             if max_words_before_after is not None:
-                before_citation_txt = ' '.join(before_citation_txt.split()[-max_words_before_after:])
-                after_citation_txt = ' '.join(after_citation_txt.split()[:max_words_before_after])
+                before_citation_txt = ' '.join(before_citation_txt.split(' ')[-max_words_before_after:])
+                after_citation_txt = ' '.join(after_citation_txt.split(' ')[:max_words_before_after])
 
             full_txt = ''.join([before_citation_txt, citation_txt, after_citation_txt])
             start_citation = len(before_citation_txt)
@@ -82,9 +83,25 @@ class Opinion:
         return self.num_words
 
 
-chars_to_clean = str.maketrans('', '', '\f\t\n')
+# Remove all \f \t (indentations)
+chars_to_clean = str.maketrans('', '', '\f\t')
+
+
 def clean_str(s: str) -> str:
-    return s.translate(chars_to_clean).strip()
+    """
+    Some cleaning of the raw text.
+    Reduce to single newlines, try to put together word breaks.
+
+    :param s: string to clean
+    :return:
+    """
+    txt = s
+    txt = re.sub(r'\u00ad\n *', '', txt)  # remove word break
+    txt = re.sub(r'\n +', '\n', txt)      # replace newline + spaces by newline
+    txt = re.sub(r'\n{2,}', '\n', txt)    # replace multiple newlines by newline
+    txt = re.sub(r' {2,}', ' ', txt)      # replace multiple spaces by space
+    txt = txt.translate(chars_to_clean)
+    return txt
 
 
 def queue_worker(func):
