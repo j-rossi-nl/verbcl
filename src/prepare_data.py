@@ -206,26 +206,43 @@ def create_sample_dataset():
 
     os.makedirs(_args.dest, exist_ok=True)
 
+    def _collect_opinions(opinion_ids: np.ndarray,
+                          file_out: str):
+        @make_spin(Default, "Collecting opinions... (might take a few minutes)")
+        def _do_collect():
+            scan_tasks = dataset.scan(filter=ds.field('opinion_id').isin(opinion_ids))
+            batches = sum((list(s.execute()) for s in scan_tasks), [])
+            # noinspection PyArgumentList
+            t = pa.Table.from_batches(batches=batches)  # incorrect warning about this call
+            return t
+
+        table = _do_collect()
+        pq.write_table(table=table, where=file_out)
+
+    def _dest_file(name: str):
+        return os.path.join(_args.dest, name)
+
     logging.info('Load citation map...')
     citation_map = pd.read_csv(_args.citation_map)
     dataset = ds.dataset(_args.path)
 
     logging.info('Random sample...')
     pool_opinion_ids = citation_map['citing_opinion_id'].unique()
-    sample_opinion_ids = np.random.choice(a=pool_opinion_ids, size=_args.num_samples, replace=False)
 
-    @make_spin(Default, "Collecting opinions... (might take a few minutes)")
-    def _collect():
-        scan_tasks = dataset.scan(filter=ds.field('opinion_id').isin(sample_opinion_ids))
-        batches = sum((list(s.execute()) for s in scan_tasks), [])
-        # noinspection PyArgumentList
-        t = pa.Table.from_batches(batches=batches)  # incorrect warning about this call
-        return t
+    todo = []
+    sample_opinion_ids: np.ndarray = np.random.choice(a=pool_opinion_ids, size=_args.num_samples, replace=False)
+    todo.append({'ids': sample_opinion_ids, 'filename': 'sample_core.parq'})
 
-    table = _collect()
-    logging.info('Writing file')
-    file_out = os.path.join(_args.dest, f'sample_{_args.num_samples}.parq')
-    pq.write_table(table=table, where=file_out)
+    if _args.add_cited:
+        cited_opinion_ids = citation_map[citation_map['citing_opinion_id'].isin(sample_opinion_ids)]['cited_opinion_id']
+        todo.append({'ids': cited_opinion_ids, 'filename': 'sample_cited.parq'})
+
+    if _args.add_citing:
+        citing_opinion_ids = citation_map[citation_map['cited_opinion_id'].isin(sample_opinion_ids)][
+            'citing_opinion_id']
+        todo.append({'ids': citing_opinion_ids, 'filename': 'sample_citing.parq'})
+
+    _ = list(map(lambda x: _collect_opinions(x['ids'], _dest_file(x['filename'])), todo))
 
 
 def download_courtlistener_opinions_bulk():
@@ -298,6 +315,15 @@ def parse_args(argstxt=None):
     parser_to_parquet.add_argument('--tags', nargs='+', help='List of tags to get for each opinion JSON file '
                                                              'in each tar,gz file in folder')
 
+    # Create a dataset of citing / cited opinion
+    _ = default_parser(
+        name='citation-map',
+        description='Extract all citations from the PARQUET dataset of opinions located in PATH, and generate a '
+                    'dataset of pairs citing_opinion / cited_opinion. The generated dataset is saved as a PARQUET'
+                    'dataset in the folder DEST.',
+        func=create_citation_map
+    )
+
     # Random sample from the opinion dataset
     parser_sample = default_parser(
         name='sample',
@@ -308,6 +334,12 @@ def parse_args(argstxt=None):
     )
     parser_sample.add_argument('--citation-map', type=str, help='CSV File of the citation map')
     parser_sample.add_argument('--num-samples', type=int, default=10000, help='Number of samples')
+    parser_sample.add_argument('--add-cited', default=False, action='store_true',
+                               help='Add all the opinions that are cited by an opinion in the random sample. '
+                                    'The size of the final sample will be larger than the argument --num-samples')
+    parser_sample.add_argument('--add-citing', default=False, action='store_true',
+                               help='Add all the opinions that cite an opinion in the random sample. The size of the '
+                                    'final sample will be larger than the argument --num-samples')
 
     # Extract all ANCHORS from all citations
     parser_anchor = default_parser(
@@ -319,15 +351,6 @@ def parse_args(argstxt=None):
     )
     parser_anchor.add_argument('--method', type=str, choices=methods_fn.keys(), default='last',
                                help='Select the method to extract anchors.')
-
-    # Create a dataset of citing / cited opinion
-    _ = default_parser(
-        name='citation-map',
-        description='Extract all citations from the PARQUET dataset of opinions located in PATH, and generate a '
-                    'dataset of pairs citing_opinion / cited_opinion. The generated dataset is saved as a PARQUET'
-                    'dataset in the folder DEST.',
-        func=create_citation_map
-    )
 
     # Produce data for annotation
     parser_doccano = default_parser(

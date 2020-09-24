@@ -84,7 +84,15 @@ class Opinion:
 
 
 # Remove all \f \t (indentations)
-chars_to_clean = str.maketrans('', '', '\f\t')
+_chars_to_clean = str.maketrans('', '', '\f\t')
+
+# Regex substitutions: regex: what to substitute
+_subs = {
+    r'\u00ad\n *': '',
+    r'\n +': '\n',
+    r'\n{2,}': '\n',
+    r' {2,}': ' ',
+}
 
 
 def clean_str(s: str) -> str:
@@ -96,11 +104,11 @@ def clean_str(s: str) -> str:
     :return:
     """
     txt = s
-    txt = re.sub(r'\u00ad\n *', '', txt)  # remove word break
-    txt = re.sub(r'\n +', '\n', txt)      # replace newline + spaces by newline
-    txt = re.sub(r'\n{2,}', '\n', txt)    # replace multiple newlines by newline
-    txt = re.sub(r' {2,}', ' ', txt)      # replace multiple spaces by space
-    txt = txt.translate(chars_to_clean)
+    txt = txt.translate(_chars_to_clean)
+
+    for regex, sub in _subs.items():
+        txt = re.sub(regex, sub, txt)  # remove word break
+
     return txt
 
 
