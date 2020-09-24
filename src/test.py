@@ -1,6 +1,6 @@
 import pyarrow.dataset as ds
 
-from utils import Opinion
+from opinion import Opinion, generate_doccano
 
 
 def test_citation_to_json():
@@ -9,7 +9,7 @@ def test_citation_to_json():
     sample = df.iloc[0]
 
     opinion = Opinion(sample['opinion_id'], sample['html_with_citations'])
-    for _ in opinion.to_jsonl(max_words_before_after=100):
+    for _ in generate_doccano(opinion=opinion, max_words_before_after=100):
         pass
 
     # Really it's only a way to use the debugger to track how the function behaves

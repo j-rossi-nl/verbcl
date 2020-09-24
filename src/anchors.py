@@ -7,7 +7,7 @@ from spacy.tokens import Doc
 from typing import List, Dict, Callable, Optional, Any
 
 from nlp_nonsense import sentence_or_not_spacy
-from utils import Opinion
+from opinion import Opinion
 
 LAST_WORDS_EXTRACT = 20
 
@@ -56,7 +56,7 @@ def _last_extract(txt: str) -> str:
     return op_anchor
 
 
-methods_fn: Dict[str, Callable[[str], Optional[str]]] = {
+anchor_extraction_methods: Dict[str, Callable[[str], Optional[str]]] = {
     'nlp': _nlp_extract,
     'last': _last_extract
 }
@@ -106,7 +106,7 @@ def extract_anchors(opinion: Opinion,
         if len(cumulated_txt) == 0:
             continue
 
-        _call = methods_fn[method]
+        _call = anchor_extraction_methods[method]
         op_anchor = _call(cumulated_txt)
         if op_anchor is not None:
             opinion_anchors.append({'cited_opinion_id': cited_opinion_id, 'anchor': op_anchor})

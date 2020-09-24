@@ -17,11 +17,11 @@ from pyspin.spin import make_spin, Default
 from typing import Any, Callable
 from tqdm import tqdm
 
-from utils import multiprocess, queue_worker
-from utils import parquet_dataset_iterator, file_list_iterator
-from utils import random_name
-from utils import opinions_in_arrowbatch, Opinion
-from anchors import extract_anchors, methods_fn
+from multiprocess import multiprocess, queue_worker
+from utils import parquet_dataset_iterator, file_list_iterator, random_name, opinions_in_arrowbatch
+from opinion import Opinion, generate_doccano
+from anchors import extract_anchors, anchor_extraction_methods
+from summary import summarization_methods
 
 # The arguments of the command are presented as a global module variable, so all functions require no arguments
 _args: Namespace = Namespace()
@@ -179,7 +179,7 @@ def worker_jsonl_for_annotation(x: pa.RecordBatch) -> int:
     file_out = os.path.join(_args.dest, f'{random_name()}.json')
     with open(file_out, 'w', encoding='utf-8') as out:
         out.write('\n'.join(j for op in opinions_in_arrowbatch(x)
-                            for j in op.to_jsonl(max_words_before_after=_args.max_words_extract)))
+                            for j in generate_doccano(opinion=op, max_words_before_after=_args.max_words_extract)))
 
     return x.num_rows
 
@@ -191,6 +191,27 @@ def create_annotation_dataset():
     """
     logging.info(f'Create JSONL for ANNOTATIONS')
     _transform_parquet_dataset(worker_jsonl_for_annotation)
+
+
+@queue_worker
+def worker_summary(x: pa.RecordBatch) -> int:
+    """
+    Create a summary of opinions.
+
+    :param x: a batch of opinions
+    :return: number of processed records
+    """
+    df = pd.DataFrame([{'opinion_id': opinion.opinion_id,
+                        f'summary_{_args.method}': summarization_methods[_args.method](opinion.raw_text)}
+                       for opinion in opinions_in_arrowbatch(x)])
+    file_out = os.path.join(_args.dest, f'{random_name()}.parq')
+    df.to_parquet(file_out)
+    return x.num_rows
+
+
+def create_summary_dataset():
+    logging.info(f'Create SUMMARIES of Opinions')
+    _transform_parquet_dataset(worker_summary)
 
 
 def create_sample_dataset():
@@ -219,7 +240,7 @@ def create_sample_dataset():
         table = _do_collect()
         pq.write_table(table=table, where=file_out)
 
-    def _dest_file(name: str):
+    def _dest_file(name: str) -> str:
         return os.path.join(_args.dest, name)
 
     logging.info('Load citation map...')
@@ -349,7 +370,7 @@ def parse_args(argstxt=None):
                     'The generated dateset is saved as PARQUET dataset in the folder DEST.',
         func=create_anchor_dataset
     )
-    parser_anchor.add_argument('--method', type=str, choices=methods_fn.keys(), default='last',
+    parser_anchor.add_argument('--method', type=str, choices=anchor_extraction_methods.keys(), default='last',
                                help='Select the method to extract anchors.')
 
     # Produce data for annotation
@@ -357,12 +378,21 @@ def parse_args(argstxt=None):
         name='doccano',
         description='From an opinion PARQUET dataset located in folder PATH, extract for each citation a snippet of'
                     'text surrounding the citation for manual anchor annotation. The text snippets are saved as a '
-                    'collection of JSONL files in folder DEST. Each file is named '
-                    '<citing_opinion_id>_<cited_opinion_id>_<seq_num>.json',
+                    'JSONL file in folder DEST',
         func=create_annotation_dataset
     )
     parser_doccano.add_argument('--max-words-extract', type=int, help='Limit the text around the citation '
                                                                       'itself to a number of characters')
+
+    # Produce a summary of opinions
+    parser_summary = default_parser(
+        name='summary',
+        description='From an opinion PARQUET dataset located in folder PATH, generate an extractive summary of each'
+                    'opinion, using one of the available methods.',
+        func=create_summary_dataset
+    )
+    parser_summary.add_argument('--method', type=str, choices=summarization_methods.keys(), default='textrank',
+                                help='Summarization method.')
 
     return parser.parse_args(argstxt)
 
