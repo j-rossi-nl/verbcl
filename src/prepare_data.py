@@ -12,21 +12,28 @@ import numpy as np
 import requests
 import datetime
 
+import config
+
 from argparse import ArgumentParser, Namespace
 from pyspin.spin import make_spin, Default
-from typing import Any, Callable
+from typing import Any, Callable, Optional
 from tqdm import tqdm
 
 from multiprocess import multiprocess, queue_worker
 from utils import parquet_dataset_iterator, file_list_iterator, random_name, opinions_in_arrowbatch
-from opinion import Opinion, generate_doccano
+from opinion import Opinion
+from doccano import generate_doccano
 from anchors import extract_anchors, anchor_extraction_methods
 from summary import summarization_methods
+from verbatim import verbatim
+from opinion_dataset import OpinionDataset
+
+# Configure
+config.config()
+
 
 # The arguments of the command are presented as a global module variable, so all functions require no arguments
 _args: Namespace = Namespace()
-
-logging.basicConfig(format='%(asctime)s | %(levelname)s | %(message)s', datefmt='%H:%M:%S', level=logging.INFO)
 
 
 @queue_worker
@@ -101,7 +108,7 @@ def _transform_parquet_dataset(worker_fn):
     dataset: Any = ds.dataset(_args.path)
     dataset: ds.FileSystemDataset  # we are sure of the actual class
 
-    iterator, nb_rows = parquet_dataset_iterator(dataset)
+    iterator, nb_rows = parquet_dataset_iterator(dataset, batch_size=_args.batch_size)
     multiprocess(worker_fn=worker_fn,
                  input_iterator_fn=iterator,
                  total=nb_rows,
@@ -244,7 +251,12 @@ def create_sample_dataset():
         return os.path.join(_args.dest, name)
 
     logging.info('Load citation map...')
-    citation_map = pd.read_csv(_args.citation_map)
+    citation_path = _args.citation_map
+    assert os.path.isdir(citation_path) or os.path.isfile(citation_path)
+    if os.path.isdir(citation_path):
+        citation_map = ds.dataset(citation_path).to_table().to_pandas()
+    else:
+        citation_map = pd.read_csv(_args.citation_map)
     dataset = ds.dataset(_args.path)
 
     logging.info('Random sample...')
@@ -264,6 +276,39 @@ def create_sample_dataset():
         todo.append({'ids': citing_opinion_ids, 'filename': 'sample_citing.parq'})
 
     _ = list(map(lambda x: _collect_opinions(x['ids'], _dest_file(x['filename'])), todo))
+
+
+def verify_sample():
+    """
+    Filter the CORE sample to keep only those whose citations are all within the CITED dataset. Overwrites the
+    PARQUET file containing the CORE sample.
+
+    :return:
+    """
+    logging.info('Verify an extracted sample of opinions')
+    logging.info(f'CORE dataset: {_args.core}')
+    logging.info(f'CITED dataset: {_args.cited}')
+
+    core = pd.read_parquet(_args.core)
+    cited_ids = pd.read_parquet(_args.cited)['opinion_id'].unique()
+    citing_missing_cited_ids = [
+        data['opinion_id'] for _, data in tqdm(core.iterrows(), total=core.shape[0])
+        if any(c['cited_opinion_id'] not in cited_ids for c in Opinion(data['opinion_id'],
+                                                                       data['html_with_citations']).citations())]
+
+    if len(citing_missing_cited_ids) == 0:
+        logging.info('Dataset is clean')
+        logging.info('All opinions cited in CORE were located in CITED')
+        return
+
+    logging.warning('Dataset is not clean. There are missing references in CITED')
+    for op_id in citing_missing_cited_ids:
+        logging.warning(f'CORE id {op_id} cites opinion(s) that are not in CITED dataset')
+
+    if _args.clean:
+        logging.warning('Clean will overwrite the CORE dataset.')
+        filtered_core = core[~core['opinion_id'].isin(citing_missing_cited_ids)]
+        filtered_core.to_parquet(_args.core)
 
 
 def download_courtlistener_opinions_bulk():
@@ -292,10 +337,44 @@ def download_courtlistener_opinions_bulk():
     if not _args.untar:
         return
 
-    logging.info(f'Unpacking archive {filename}')
-    with tarfile.open(filename, 'r') as tar:
-        for m in tqdm(tar.getmembers()):
-            tar.extract(m, path=_args.to)
+    @make_spin(Default, f'Unpacking archive {filename}')
+    def _unpack():
+        with tarfile.open(filename, 'r') as tar:
+            for m in tqdm(tar.getmembers()):
+                tar.extract(m, path=_args.to)
+    _unpack()
+
+
+_cited_dataset: Optional[OpinionDataset] = None
+
+
+@queue_worker
+def worker_verbatim(x: pa.RecordBatch) -> int:
+    opinion_verbatims = []
+    for opinion in opinions_in_arrowbatch(x):
+        opinion: Opinion
+        op_verbatims = verbatim(citing_opinion=opinion,
+                                search_radius=_args.search_radius,
+                                cited_opinions=_cited_dataset)
+        opinion_verbatims.extend(o for o in op_verbatims)
+
+    # Wrap-up, save to PARQUET file and return the number of processed rows
+    df = pd.DataFrame(opinion_verbatims)
+
+    file_out = os.path.join(_args.dest, f'{random_name()}.parq')
+    df.to_parquet(file_out)
+    return x.num_rows
+
+
+def create_verbatim_dataset():
+    """
+
+    :return:
+    """
+    logging.info('Looking for Verbatim citations.')
+    global _cited_dataset
+    _cited_dataset = OpinionDataset(_args.cited_dataset)
+    _transform_parquet_dataset(worker_verbatim)
 
 
 def parse_args(argstxt=None):
@@ -315,6 +394,8 @@ def parse_args(argstxt=None):
         new_parser.add_argument('--dest', type=str, help='DESTINATION dataset')
         if parallel:
             new_parser.add_argument('--num-workers', type=int, default=4, help='Number of parallel workers')
+            new_parser.add_argument('--batch-size', type=int, default=1024, help='Number of records sent at once to a '
+                                                                                 'worker')
         new_parser.set_defaults(func=func)
         return new_parser
 
@@ -362,6 +443,17 @@ def parse_args(argstxt=None):
                                help='Add all the opinions that cite an opinion in the random sample. The size of the '
                                     'final sample will be larger than the argument --num-samples')
 
+    # Check a sample for completeness
+    parser_verify = subparsers.add_parser(
+        name='verify',
+        description='Verify a random sample, to make sure all opinions cited from within the core sample are located '
+                    'in the cited dataset.')
+    parser_verify.add_argument('--core', type=str, help='Path to the PARQUET file with the CORE sample')
+    parser_verify.add_argument('--cited', type=str, help='Path to the PARUET file with the CITED sample')
+    parser_verify.add_argument('--clean', default=False, action='store_true', help='Clean the CORE sample (will '
+                                                                                   'overwrite its PARQUET file')
+    parser_verify.set_defaults(func=verify_sample)
+
     # Extract all ANCHORS from all citations
     parser_anchor = default_parser(
         name='anchor',
@@ -394,6 +486,17 @@ def parse_args(argstxt=None):
     parser_summary.add_argument('--method', type=str, choices=summarization_methods.keys(), default='textrank',
                                 help='Summarization method.')
 
+    # Extract verbatim citations
+    parser_verbatim = default_parser(
+        name='verbatim',
+        description='From an opinion PARQUET dataset located in folder PATH, generate a dataset of instances of '
+                    'citations done by quoting the cited opinion.',
+        func=create_verbatim_dataset
+    )
+    parser_verbatim.add_argument('--cited-dataset', type=str, help='Path to the PARQUET dataset from which to retrieve '
+                                                                   'the cited opinions.')
+    parser_verbatim.add_argument('--search-radius', type=int, help='Number of words before and after a citation in '
+                                                                   'which to look for a quoted citation.')
     return parser.parse_args(argstxt)
 
 

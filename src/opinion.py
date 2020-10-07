@@ -1,13 +1,11 @@
 import bs4
-import json
 import copy
 import re
 
-from typing import Iterator, Any, Dict, Optional
+from typing import Iterator, Any, Dict
 from bs4 import BeautifulSoup
 
-
-DOCCANO_CITATION_TAG = 'CITATION'
+CITATION_MARK = 'CITATION_@@_'
 
 
 class Opinion:
@@ -15,6 +13,7 @@ class Opinion:
     A helper class to manipulate an opinion.
     """
     bs4_citation_args = {'class': 'citation', 'data-id': True}
+    mark_regex = re.compile(f'{CITATION_MARK}' + r'\w+')
 
     def __init__(self, opinion_id: int, opinion_html: str):
         self.opinion_id = opinion_id
@@ -26,9 +25,8 @@ class Opinion:
         # MARK = replace all citations with easily findable strings in the raw text
         self.marked_soup = copy.copy(self.soup)
         for c in self.marked_soup.find_all('span', **Opinion.bs4_citation_args):
-            c.string = f'MARK_FOR_CITATION_{c["data-id"]}'
+            c.string = f'{CITATION_MARK}{c["data-id"]}'
         self.marked_text = clean_str(self.marked_soup.get_text())
-        self.mark_regex = re.compile(r'MARK_FOR_CITATION_\w+')
 
     def citations(self, return_tag: bool = False) -> Iterator[Dict[str, Any]]:
         """
@@ -60,6 +58,14 @@ class Opinion:
                 'span': (start, end)
             }
 
+    def citations_and_marks(self) -> Iterator[Dict[str, Any]]:
+        """
+        An iterator that yields the data from citation_marks() and citations()
+        :return: an iterator
+        """
+        for citation, mark in zip(self.citations(), self.citation_marks()):
+            yield {**citation, **mark}
+
     def __len__(self):
         return self.num_words
 
@@ -88,7 +94,7 @@ def clean_str(s: str) -> str:
     txt = txt.translate(_chars_to_clean)
 
     for regex, sub in _subs.items():
-        txt = re.sub(regex, sub, txt)  # remove word break
+        txt = re.sub(regex, sub, txt)
 
     return txt
 
@@ -108,32 +114,3 @@ def clean_html(html: BeautifulSoup) -> BeautifulSoup:
         nolink.decompose()
 
     return html
-
-
-def generate_doccano(opinion: Opinion, max_words_before_after: Optional[int] = None) -> Iterator[str]:
-    """
-    For each citation in an opinion, generate the snippet of text that will be used by annotators.
-    It is returned in JSONL format, and the citation itself is marked as 'CITATION'.
-
-    :param opinion: the opinion to process
-    :param max_words_before_after: number of words of the text before and after the tag to include for the
-    annotator. If None, then the whole text is returned
-    :return: Iterator that yields JSONL strings
-    """
-    for citation in opinion.citation_marks():
-        start, end = citation['span']
-        marked_text = citation['marked_text']
-
-        before_citation_txt = marked_text[:start]
-        citation_txt = marked_text[start:end]
-        after_citation_txt = marked_text[end:]
-
-        if max_words_before_after is not None:
-            before_citation_txt = ' '.join(before_citation_txt.split(' ')[-max_words_before_after:])
-            after_citation_txt = ' '.join(after_citation_txt.split(' ')[:max_words_before_after])
-
-        full_txt = ''.join([before_citation_txt, citation_txt, after_citation_txt])
-        start_citation = len(before_citation_txt)
-        end_citation = start_citation + len(citation_txt)
-
-        yield json.dumps({'text': full_txt, 'labels': [[start_citation, end_citation, DOCCANO_CITATION_TAG]]})

@@ -1,16 +1,13 @@
-import pyarrow.dataset as ds
+from opinion import Opinion
+from verbatim import verbatim
+from opinion_dataset import OpinionDataset
 
-from opinion import Opinion, generate_doccano
 
-
-def test_citation_to_json():
-    dataset = ds.dataset('../data/01_FROM_ILPS/00_OPINIONS_SAMPLE')
-    df = dataset.to_table().to_pandas()
-    sample = df.iloc[0]
-
-    opinion = Opinion(sample['opinion_id'], sample['html_with_citations'])
-    for _ in generate_doccano(opinion=opinion, max_words_before_after=100):
-        pass
+def test():
+    dataset = OpinionDataset(path='../data/01_FROM_ILPS/00_OPINIONS_SAMPLE/01_CORE')
+    for opinion in iter(dataset):
+        for _ in verbatim(citing_opinion=opinion, search_radius=100, cited_opinions=OpinionDataset(path='../data/01_FROM_ILPS/00_OPINIONS_SAMPLE/02_CITED')):
+            pass
 
     # Really it's only a way to use the debugger to track how the function behaves
     # but not really a unit test
@@ -18,4 +15,4 @@ def test_citation_to_json():
 
 
 if __name__ == '__main__':
-    test_citation_to_json()
+    test()
