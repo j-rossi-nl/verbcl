@@ -1,9 +1,10 @@
 import pyarrow.dataset as ds
+import pyarrow as pa
 import pandas as pd
 
-from opinion import Opinion
+from .opinion import Opinion
 
-from typing import Optional
+from typing import Iterator, Optional
 
 
 class OpinionDataset:
@@ -47,3 +48,15 @@ class OpinionDataset:
 
     def __len__(self):
         return self.df.shape[0]
+
+
+def opinions_in_arrowbatch(x: pa.RecordBatch) -> Iterator[Opinion]:
+    """
+    Helper to iterate through batches of opinion records coming from PARQUET dataset of opinions.
+
+    :param x: batch
+    :return: Opinion objects
+    """
+    d = x.to_pydict()
+    for citing_opinion_id, opinion_html in zip(d['opinion_id'], d['html_with_citations']):
+        yield Opinion(opinion_id=citing_opinion_id, opinion_html=opinion_html)

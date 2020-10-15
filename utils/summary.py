@@ -10,7 +10,10 @@ gensim_logger.setLevel(logging.ERROR)
 
 
 def textrank(txt):
-    return summarize(txt)
+    try:
+        return summarize(txt)
+    except ValueError:
+        return txt
 
 
 summarization_methods: Dict[str, Callable[[str], str]] = {

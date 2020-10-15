@@ -1,3 +1,4 @@
 /data/
 /.idea/
-/src/__pycache__
+/courtlistener/__pycache__
+/utils/__pycache__

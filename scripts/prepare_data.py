@@ -12,31 +12,24 @@ import numpy as np
 import requests
 import datetime
 
-import config
+import utils
 
 from argparse import ArgumentParser, Namespace
 from pyspin.spin import make_spin, Default
 from typing import Any, Callable, Optional
 from tqdm import tqdm
 
-from multiprocess import multiprocess, queue_worker
-from utils import parquet_dataset_iterator, file_list_iterator, random_name, opinions_in_arrowbatch
-from opinion import Opinion
-from doccano import generate_doccano
-from anchors import extract_anchors, anchor_extraction_methods
-from summary import summarization_methods
-from verbatim import verbatim
-from opinion_dataset import OpinionDataset
+from courtlistener import Opinion, OpinionDataset, opinions_in_arrowbatch
 
 # Configure
-config.config()
+utils.config()
 
 
 # The arguments of the command are presented as a global module variable, so all functions require no arguments
 _args: Namespace = Namespace()
 
 
-@queue_worker
+@utils.queue_worker
 def worker_extract_opinion(x: str) -> int:
     """
     Open a targz file, go through all contained JSON files, without extracting to disk, and in each file, extract
@@ -91,12 +84,12 @@ def create_opinion_dataset():
     os.makedirs(_args.dest, exist_ok=True)
 
     targz_files = glob.glob(os.path.join(_args.path, '*.tar.gz'))
-    iterator, nb_files = file_list_iterator(targz_files)
-    multiprocess(worker_fn=worker_extract_opinion,
-                 input_iterator_fn=iterator,
-                 total=nb_files,
-                 nb_workers=_args.num_workers,
-                 description='Extract opinion XML from archives')
+    iterator, nb_files = utils.file_list_iterator(targz_files)
+    utils.multiprocess(worker_fn=worker_extract_opinion,
+                       input_iterator_fn=iterator,
+                       total=nb_files,
+                       nb_workers=_args.num_workers,
+                       description='Extract opinion XML from archives')
 
 
 def _transform_parquet_dataset(worker_fn):
@@ -108,15 +101,15 @@ def _transform_parquet_dataset(worker_fn):
     dataset: Any = ds.dataset(_args.path)
     dataset: ds.FileSystemDataset  # we are sure of the actual class
 
-    iterator, nb_rows = parquet_dataset_iterator(dataset, batch_size=_args.batch_size)
-    multiprocess(worker_fn=worker_fn,
-                 input_iterator_fn=iterator,
-                 total=nb_rows,
-                 nb_workers=_args.num_workers,
-                 description='Progress')
+    iterator, nb_rows = utils.parquet_dataset_iterator(dataset, batch_size=_args.batch_size)
+    utils.multiprocess(worker_fn=worker_fn,
+                       input_iterator_fn=iterator,
+                       total=nb_rows,
+                       nb_workers=_args.num_workers,
+                       description='Progress')
 
 
-@queue_worker
+@utils.queue_worker
 def worker_extract_citation_map(x: pa.RecordBatch) -> int:
     """
     Get a list of 2-uple citing_opinion / cited_opinion.
@@ -135,7 +128,7 @@ def worker_extract_citation_map(x: pa.RecordBatch) -> int:
         df[c] = df[c].apply(pd.to_numeric)
 
     if len(df) > 0:
-        file_out = os.path.join(_args.dest, f'{random_name()}.parq')
+        file_out = os.path.join(_args.dest, f'{utils.random_name()}.parq')
         df.to_parquet(file_out)
 
     return x.num_rows
@@ -146,47 +139,15 @@ def create_citation_map():
     _transform_parquet_dataset(worker_extract_citation_map)
 
 
-@queue_worker
-def worker_extract_anchor(x: pa.RecordBatch) -> int:
-    """
-    Extract for each citation, the ANCHOR of it, which is the catchphrase that introduces the citED opinion
-    in the citING opinion. Each cited opinion is introduced by a sentence that underlines what from the cited
-    opinion is an argument for the citing opinion.
-    A parquet file is written on disk with the results.
-
-    :param x: a batch (pyarrow.RecordBatch)
-    :return: number of rows in the batch (int)
-    """
-    opinion_anchors = []
-    for opinion in opinions_in_arrowbatch(x):
-        opinion: Opinion
-        op_anchors = extract_anchors(opinion, method=_args.method)
-        opinion_anchors.extend([[opinion.opinion_id, g['cited_opinion_id'], g['anchor']] for g in op_anchors])
-
-    # Wrap-up, save to PARQUET file and return the number of processed rows
-    df = pd.DataFrame(opinion_anchors, columns=['citing_opinion_id', 'cited_opinion_id', 'anchor'])
-    for c in ['citing_opinion_id', 'cited_opinion_id']:
-        df[c] = df[c].apply(pd.to_numeric)
-
-    file_out = os.path.join(_args.dest, f'{random_name()}.parq')
-    df.to_parquet(file_out)
-    return x.num_rows
-
-
-def create_anchor_dataset():
-    logging.info(f'Create ANCHORS with method {_args.method}')
-    _transform_parquet_dataset(worker_extract_anchor)
-
-
-@queue_worker
+@utils.queue_worker
 def worker_jsonl_for_annotation(x: pa.RecordBatch) -> int:
     """
     Extract the text to be annotated for anchor extraction.
     """
-    file_out = os.path.join(_args.dest, f'{random_name()}.json')
+    file_out = os.path.join(_args.dest, f'{utils.random_name()}.json')
     with open(file_out, 'w', encoding='utf-8') as out:
         out.write('\n'.join(j for op in opinions_in_arrowbatch(x)
-                            for j in generate_doccano(opinion=op, max_words_before_after=_args.max_words_extract)))
+                            for j in op.doccano(max_words_before_after=_args.max_words_extract)))
 
     return x.num_rows
 
@@ -200,7 +161,7 @@ def create_annotation_dataset():
     _transform_parquet_dataset(worker_jsonl_for_annotation)
 
 
-@queue_worker
+@utils.queue_worker
 def worker_summary(x: pa.RecordBatch) -> int:
     """
     Create a summary of opinions.
@@ -209,15 +170,15 @@ def worker_summary(x: pa.RecordBatch) -> int:
     :return: number of processed records
     """
     df = pd.DataFrame([{'opinion_id': opinion.opinion_id,
-                        f'summary_{_args.method}': summarization_methods[_args.method](opinion.raw_text)}
+                        f'summary_{_args.method}': utils.summarization_methods[_args.method](opinion.raw_text)}
                        for opinion in opinions_in_arrowbatch(x)])
-    file_out = os.path.join(_args.dest, f'{random_name()}.parq')
+    file_out = os.path.join(_args.dest, f'{utils.random_name()}.parq')
     df.to_parquet(file_out)
     return x.num_rows
 
 
 def create_summary_dataset():
-    logging.info(f'Create SUMMARIES of Opinions')
+    logging.info(f'Create SUMMARIES of utils.Opinions')
     _transform_parquet_dataset(worker_summary)
 
 
@@ -228,7 +189,7 @@ def create_sample_dataset():
     :return:
     """
     logging.info('Extract a random sample of opinions')
-    logging.info(f'Opinion Dataset: {_args.path}')
+    logging.info(f'utils.Opinion Dataset: {_args.path}')
     logging.info(f'Extract to: {_args.dest}')
     logging.info(f'Nb samples: {_args.num_samples}')
 
@@ -322,7 +283,7 @@ def download_courtlistener_opinions_bulk():
     response = requests.get(url, stream=True)
     total_size_in_bytes = int(response.headers.get('content-length', 0))
 
-    logging.info(f'Download Court Listener Opinion dataset, from URL {url}')
+    logging.info(f'Download Court Listener utils.Opinion dataset, from URL {url}')
     logging.info(f'Destination file: {filename}')
     with tqdm(total=total_size_in_bytes, unit='iB', unit_scale=True) as progress_bar:
         with open(filename, 'wb') as file:
@@ -348,35 +309,6 @@ def download_courtlistener_opinions_bulk():
 _cited_dataset: Optional[OpinionDataset] = None
 
 
-@queue_worker
-def worker_verbatim(x: pa.RecordBatch) -> int:
-    opinion_verbatims = []
-    for opinion in opinions_in_arrowbatch(x):
-        opinion: Opinion
-        op_verbatims = verbatim(citing_opinion=opinion,
-                                search_radius=_args.search_radius,
-                                cited_opinions=_cited_dataset)
-        opinion_verbatims.extend(o for o in op_verbatims)
-
-    # Wrap-up, save to PARQUET file and return the number of processed rows
-    df = pd.DataFrame(opinion_verbatims)
-
-    file_out = os.path.join(_args.dest, f'{random_name()}.parq')
-    df.to_parquet(file_out)
-    return x.num_rows
-
-
-def create_verbatim_dataset():
-    """
-
-    :return:
-    """
-    logging.info('Looking for Verbatim citations.')
-    global _cited_dataset
-    _cited_dataset = OpinionDataset(_args.cited_dataset)
-    _transform_parquet_dataset(worker_verbatim)
-
-
 def parse_args(argstxt=None):
     if argstxt is None:
         argstxt = sys.argv[1:]
@@ -399,7 +331,7 @@ def parse_args(argstxt=None):
         new_parser.set_defaults(func=func)
         return new_parser
 
-    # Download the Opinion dataset from CourtListener
+    # Download the utils.Opinion dataset from CourtListener
     # Unpack it if requested
     parser_download = subparsers.add_parser('download')
     parser_download.add_argument('--to', type=str, help='Download folder')
@@ -454,17 +386,6 @@ def parse_args(argstxt=None):
                                                                                    'overwrite its PARQUET file')
     parser_verify.set_defaults(func=verify_sample)
 
-    # Extract all ANCHORS from all citations
-    parser_anchor = default_parser(
-        name='anchor',
-        description='Extract all citation anchors from the PARQUET opinion located in folder PATH. The generated '
-                    'dataset has one sample per citation, with fields citing_opinion_id, cited_opinion_id, anchor. '
-                    'The generated dateset is saved as PARQUET dataset in the folder DEST.',
-        func=create_anchor_dataset
-    )
-    parser_anchor.add_argument('--method', type=str, choices=anchor_extraction_methods.keys(), default='last',
-                               help='Select the method to extract anchors.')
-
     # Produce data for annotation
     parser_doccano = default_parser(
         name='doccano',
@@ -483,20 +404,9 @@ def parse_args(argstxt=None):
                     'opinion, using one of the available methods.',
         func=create_summary_dataset
     )
-    parser_summary.add_argument('--method', type=str, choices=summarization_methods.keys(), default='textrank',
+    parser_summary.add_argument('--method', type=str, choices=utils.summarization_methods.keys(), default='textrank',
                                 help='Summarization method.')
 
-    # Extract verbatim citations
-    parser_verbatim = default_parser(
-        name='verbatim',
-        description='From an opinion PARQUET dataset located in folder PATH, generate a dataset of instances of '
-                    'citations done by quoting the cited opinion.',
-        func=create_verbatim_dataset
-    )
-    parser_verbatim.add_argument('--cited-dataset', type=str, help='Path to the PARQUET dataset from which to retrieve '
-                                                                   'the cited opinions.')
-    parser_verbatim.add_argument('--search-radius', type=int, help='Number of words before and after a citation in '
-                                                                   'which to look for a quoted citation.')
     return parser.parse_args(argstxt)
 
 
