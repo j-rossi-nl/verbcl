@@ -1,0 +1,50 @@
+<!DOCTYPE HTML>
+<!--
+	Eventually by HTML5 UP
+	html5up.net | @ajlkn
+	Free for personal and commercial use under the CCA 3.0 license (html5up.net/license)
+-->
+
+{% load static %}
+
+<html lang="en-US">
+<head>
+    <title>Verbatims</title>
+    <meta charset="utf-8"/>
+    <meta name="viewport" content="width=device-width, initial-scale=0.1, user-scalable=no"/>
+    <link rel="stylesheet" href="{% static 'assets/css/main.css' %}" />
+	<link rel="stylesheet" href="{% static 'assets/css/juju.css' %}" />
+</head>
+<body>
+
+<!-- Header -->
+<header id="header">
+    <h1>Verbatims</h1>
+</header>
+
+<div class="row" style="line-height: 1.1em">
+	<div class="column" style="width: 40%">
+		<form method="post" enctype="multipart/form-data">
+			{% csrf_token %}
+			<button type="submit" style="background-color:#3F33FF" name="next">Next Sample</button>
+		</form>
+		<hr>
+		{{ snippet_html | safe }}
+	</div>
+
+	<div class="column" style="width: 60%;" >
+		<form method="post" enctype="multipart/form-data">
+			{% csrf_token %}
+			<button type="submit" name="yes">YES</button>
+			&emsp; &emsp;
+			<button type="submit" style="background-color:#ff2361" name="no">NO</button>
+		</form>
+		<hr>
+		<div style="height:800px;overflow:auto;">
+			{{ cited_opinion | safe }}
+		</div>
+	</div>
+</div>
+
+</body>
+</html>

@@ -101,7 +101,7 @@ class Opinion:
 
             yield json.dumps({'text': full_txt, 'labels': [[start_citation, end_citation, DOCCANO_CITATION_TAG]]})
 
-    def verbatim(self) -> Iterator[Dict[str, Any]]:
+    def verbatim(self, max_words_before_after: int, min_words_verbatim: int) -> Iterator[Dict[str, Any]]:
         """
         An iterator that yields potential verbatim quotes from cited opinions.
         Warning: it does not check that the verbatim quotes are indeed from the cited opinion
@@ -111,23 +111,18 @@ class Opinion:
         for citation in self.citations_and_marks():
             snippet_txt, len_before, len_after = text_before_after(citation['marked_text'],
                                                                    citation['span'],
-                                                                   nb_words=100)
+                                                                   nb_words=max_words_before_after)
 
-            # 1) Find a verbatim quote in the text before the citation
-            m = self.verbatim_quote.search(snippet_txt[:-len_after])
-            if m is None:
-                # No quote located in the text
-                continue
-
-            # 2) If there is a verbatim quote, confirm that it comes from the cited opinion
-            verbatim_txt = m['quote']
-
-            yield {
-                'citing_opinion_id': self.opinion_id,
-                'cited_opinion_id': citation['cited_opinion_id'],
-                'verbatim': verbatim_txt,
-                'snippet': snippet_txt
-            }
+            # Find all verbatim quote in the text before the citation
+            for m in filter(lambda x: len(x['quote'].split()) >= min_words_verbatim,
+                            self.verbatim_quote.finditer(snippet_txt[:-len_after])):
+                yield {
+                    'citing_opinion_id': self.opinion_id,
+                    'cited_opinion_id': citation['cited_opinion_id'],
+                    'verbatim': m['quote'],
+                    'snippet': snippet_txt,
+                    'span_in_snippet': m.span()
+                }
 
     def __len__(self):
         return self.num_words
@@ -165,16 +160,17 @@ def clean_str(s: str) -> str:
 def clean_html(html: BeautifulSoup) -> BeautifulSoup:
     # A bit of cleaning on the original HTML
     # It includes tags for original pagination that insert numbers here and there in the text
-    bs4_pagination_args = {'class': 'pagination'}
-    bs4_citation_args_nolink = {'class': 'citation no-link'}
+    decompose = [
+        'pagination',
+        'citation no-link',
+        'star-pagination',
+    ]
 
-    for page in html.find_all('span', **bs4_pagination_args):
-        page: bs4.element.Tag
-        page.decompose()
-
-    for nolink in html.find_all('span', **bs4_citation_args_nolink):
-        nolink: bs4.element.Tag
-        nolink.decompose()
+    for d in decompose:
+        bs4_args = {'class': d}
+        for f in html.find_all('span', **bs4_args):
+            f: bs4.element.Tag
+            f.decompose()
 
     return html
 

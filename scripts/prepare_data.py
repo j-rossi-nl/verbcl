@@ -1,20 +1,22 @@
+import datetime
 import glob
-import os
-import tarfile
-import pandas as pd
 import json
-import sys
+import logging
+import numpy as np
+import pandas as pd
+import os
 import pyarrow as pa
 import pyarrow.dataset as ds
 import pyarrow.parquet as pq
-import logging
-import numpy as np
 import requests
-import datetime
+import tarfile
+import shutil
+import sys
 
 import utils
 
 from argparse import ArgumentParser, Namespace
+from nltk.tokenize import sent_tokenize
 from pyspin.spin import make_spin, Default
 from typing import Any, Callable, Optional
 from tqdm import tqdm
@@ -27,69 +29,6 @@ utils.config()
 
 # The arguments of the command are presented as a global module variable, so all functions require no arguments
 _args: Namespace = Namespace()
-
-
-@utils.queue_worker
-def worker_extract_opinion(x: str) -> int:
-    """
-    Open a targz file, go through all contained JSON files, without extracting to disk, and in each file, extract
-    a set of values, based on the list of tags given in args.tags. Builds a CSV file with all extracted data, one line
-    per original JSON file.
-    The CSV file is in the args.dest folder.
-    Assumes the targz is made only of json files (it is the case in COURT LISTENER dataset)
-
-    :param x: path to a tar.gz file containing multiple JSON files, one for each opinion
-    :return: path to PARQUET file with the opinions
-    """
-    data = []
-    try:
-        with tarfile.open(x, mode='r:*') as tgz:
-            json_list = tgz.getmembers()
-            for json_member in json_list:
-                # Extract to memory each JSON file
-                json_file = tgz.extractfile(json_member)
-                js = json.load(json_file)
-                if not all([t in js for t in _args.tags]):
-                    continue
-                data.append([js[t] for t in _args.tags])
-    except Exception as caught:
-        print('Processing {}, Exception {}'.format(x, caught))
-
-    file_out = os.path.join(_args.dest, f'{os.path.basename(x)[:-7]}.parq')
-    df = pd.DataFrame(data, columns=_args.tags)
-
-    # The opinion id is the field 'id'. For clarity, rename it 'opinion_id'
-    if 'id' in df.columns:
-        df['opinion_id'] = df['id'].apply(pd.to_numeric)
-        df = df.drop(columns=['id'])
-
-    # Some courts just don't have data
-    if df.shape[0] > 0:
-        df.to_parquet(path=file_out)
-
-    # We processed 1 file
-    return 1
-
-
-def create_opinion_dataset():
-    """
-    Extract values from JSON files in targz files. Each targz file will generate a PARQUET file.
-
-    :return:
-    """
-    logging.info('Converting from CourtListener format to Parquet Dataset')
-    logging.info(f'Extracting Tags: {" / ".join(_args.tags)}')
-    logging.info(f'From folder: {_args.path}')
-    logging.info(f'To folder: {_args.dest}')
-    os.makedirs(_args.dest, exist_ok=True)
-
-    targz_files = glob.glob(os.path.join(_args.path, '*.tar.gz'))
-    iterator, nb_files = utils.file_list_iterator(targz_files)
-    utils.multiprocess(worker_fn=worker_extract_opinion,
-                       input_iterator_fn=iterator,
-                       total=nb_files,
-                       nb_workers=_args.num_workers,
-                       description='Extract opinion XML from archives')
 
 
 def _transform_parquet_dataset(worker_fn):
@@ -109,77 +48,172 @@ def _transform_parquet_dataset(worker_fn):
                        description='Progress')
 
 
-@utils.queue_worker
-def worker_extract_citation_map(x: pa.RecordBatch) -> int:
-    """
-    Get a list of 2-uple citing_opinion / cited_opinion.
-
-    :param x: batch of opinions to parse
-    :return: number of processed opinions
-    """
-    citations = []
-    for opinion in opinions_in_arrowbatch(x):
-        citing_opinion_id = opinion.opinion_id
-        cited_opinions = set(d['cited_opinion_id'] for d in opinion.citations())
-        citations.extend([{'citing_opinion_id': citing_opinion_id, 'cited_opinion_id': x} for x in cited_opinions])
-
-    df = pd.DataFrame(citations)
-    for c in df.columns:
-        df[c] = df[c].apply(pd.to_numeric)
-
-    if len(df) > 0:
-        file_out = os.path.join(_args.dest, f'{utils.random_name()}.parq')
-        df.to_parquet(file_out)
-
-    return x.num_rows
-
-
-def create_citation_map():
-    logging.info('Create CITATION MAP')
-    _transform_parquet_dataset(worker_extract_citation_map)
-
-
-@utils.queue_worker
-def worker_jsonl_for_annotation(x: pa.RecordBatch) -> int:
-    """
-    Extract the text to be annotated for anchor extraction.
-    """
-    file_out = os.path.join(_args.dest, f'{utils.random_name()}.json')
-    with open(file_out, 'w', encoding='utf-8') as out:
-        out.write('\n'.join(j for op in opinions_in_arrowbatch(x)
-                            for j in op.doccano(max_words_before_after=_args.max_words_extract)))
-
-    return x.num_rows
-
-
 def create_annotation_dataset():
     """
     Uses an opinion dataset and create the text snippets that will be manually annotated.
     The output is a collection of TXT files.
     """
+    @utils.queue_worker
+    def worker_jsonl_for_annotation(x: pa.RecordBatch) -> int:
+        """
+        Extract the text to be annotated for anchor extraction.
+        """
+        file_out = os.path.join(_args.dest, f'{utils.random_name()}.json')
+        with open(file_out, 'w', encoding='utf-8') as out:
+            out.write('\n'.join(j for op in opinions_in_arrowbatch(x)
+                                for j in op.doccano(max_words_before_after=_args.max_words_extract)))
+
+        return x.num_rows
+
     logging.info(f'Create JSONL for ANNOTATIONS')
     _transform_parquet_dataset(worker_jsonl_for_annotation)
 
 
-@utils.queue_worker
-def worker_summary(x: pa.RecordBatch) -> int:
+def create_citation_map():
+    @utils.queue_worker
+    def worker_extract_citation_map(x: pa.RecordBatch) -> int:
+        """
+        Get a list of 2-uple citing_opinion / cited_opinion.
+
+        :param x: batch of opinions to parse
+        :return: number of processed opinions
+        """
+        citations = []
+        for opinion in opinions_in_arrowbatch(x):
+            citing_opinion_id = opinion.opinion_id
+            cited_opinions = set(d['cited_opinion_id'] for d in opinion.citations())
+            citations.extend([{'citing_opinion_id': citing_opinion_id, 'cited_opinion_id': x} for x in cited_opinions])
+
+        df = pd.DataFrame(citations)
+        for c in df.columns:
+            df[c] = df[c].apply(pd.to_numeric)
+
+        if len(df) > 0:
+            file_out = os.path.join(_args.dest, f'{utils.random_name()}.parq')
+            df.to_parquet(file_out)
+
+        return x.num_rows
+
+    logging.info('Create CITATION MAP')
+    _transform_parquet_dataset(worker_extract_citation_map)
+
+
+def create_opinion_dataset():
     """
-    Create a summary of opinions.
+    Extract values from JSON files in targz files. Each targz file will generate a PARQUET file.
 
-    :param x: a batch of opinions
-    :return: number of processed records
+    :return:
     """
-    df = pd.DataFrame([{'opinion_id': opinion.opinion_id,
-                        f'summary_{_args.method}': utils.summarization_methods[_args.method](opinion.raw_text)}
-                       for opinion in opinions_in_arrowbatch(x)])
-    file_out = os.path.join(_args.dest, f'{utils.random_name()}.parq')
-    df.to_parquet(file_out)
-    return x.num_rows
+    @utils.queue_worker
+    def worker_extract_opinion(x: str) -> int:
+        """
+        Open a targz file, go through all contained JSON files, without extracting to disk, and in each file, extract
+        a set of values, based on the list of tags given in args.tags. Builds a CSV file with all extracted data,
+        one line per original JSON file.
+        The CSV file is in the args.dest folder.
+        Assumes the targz is made only of json files (it is the case in COURT LISTENER dataset)
+
+        :param x: path to a tar.gz file containing multiple JSON files, one for each opinion
+        :return: path to PARQUET file with the opinions
+        """
+        data = []
+        try:
+            with tarfile.open(x, mode='r:*') as tgz:
+                json_list = tgz.getmembers()
+                for json_member in json_list:
+                    # Extract to memory each JSON file
+                    json_file = tgz.extractfile(json_member)
+                    js = json.load(json_file)
+                    if not all([t in js for t in _args.tags]):
+                        continue
+                    data.append([js[t] for t in _args.tags])
+        except Exception as caught:
+            print('Processing {}, Exception {}'.format(x, caught))
+
+        file_out = os.path.join(_args.dest, f'{os.path.basename(x)[:-7]}.parq')
+        df = pd.DataFrame(data, columns=_args.tags)
+
+        # The opinion id is the field 'id'. For clarity, rename it 'opinion_id'
+        if 'id' in df.columns:
+            df['opinion_id'] = df['id'].apply(pd.to_numeric)
+            df = df.drop(columns=['id'])
+
+        # Some courts just don't have data
+        if df.shape[0] > 0:
+            df.to_parquet(path=file_out)
+
+        # We processed 1 file
+        return 1
+
+    logging.info('Converting from CourtListener format to Parquet Dataset')
+    logging.info(f'Extracting Tags: {" / ".join(_args.tags)}')
+    logging.info(f'From folder: {_args.path}')
+    logging.info(f'To folder: {_args.dest}')
+    os.makedirs(_args.dest, exist_ok=True)
+
+    targz_files = glob.glob(os.path.join(_args.path, '*.tar.gz'))
+    iterator, nb_files = utils.file_list_iterator(targz_files)
+    utils.multiprocess(worker_fn=worker_extract_opinion,
+                       input_iterator_fn=iterator,
+                       total=nb_files,
+                       nb_workers=_args.num_workers,
+                       description='Extract opinion XML from archives')
 
 
-def create_summary_dataset():
-    logging.info(f'Create SUMMARIES of utils.Opinions')
-    _transform_parquet_dataset(worker_summary)
+def create_prophetnet():
+    """
+    Create original data ready for preprocessing and summarization with ProphetNet.
+    For each opinion in the dataset, the full text is written as one line with sentences separated by `<S_SEP>`.
+    This file is ready to be preprocessed like cnndm from prophetnet, etc...
+    Refer to https://github.com/microsoft/ProphetNet for further instructions
+    :return:
+    """
+    @utils.queue_worker
+    def worker_prepare_prophetnet(x: pa.RecordBatch) -> int:
+        texts = []
+        ids = []
+        for opinion in opinions_in_arrowbatch(x):
+            full_text = '<S_SEP>'.join(sent_tokenize(opinion.raw_text)).replace('\n', '').replace('\r', '')
+            texts.append(full_text)
+            ids.append(str(opinion.opinion_id))
+
+        fout = os.path.join(_args.dest, utils.random_name())
+        fout_txt = fout + '.txt'
+        fout_idx = fout + '.idx'
+
+        with open(fout_txt, 'w') as f:
+            f.write('\n'.join(texts))
+
+        with open(fout_idx, 'w') as f:
+            f.write('\n'.join(ids))
+
+        return x.num_rows
+
+    logging.info('Creating ProphetNet input dataset')
+    _transform_parquet_dataset(worker_prepare_prophetnet)
+
+    # Gather all txt files into 1 and prepare the index
+    txts = glob.glob(os.path.join(_args.dest, '*.txt'))
+    idxs = [x[:-4]+'.idx' for x in txts]
+
+    opinions_file = os.path.join(_args.dest, 'opinions.txt')
+    index_file = os.path.join(_args.dest, 'opinions.idx')
+    with open(opinions_file, 'w') as all_texts:
+        with open(index_file, 'w') as all_idxs:
+            for txt, idx in zip(txts, idxs):
+                all_texts.write(open(txt).read())
+                all_idxs.write(open(idx).read())
+
+                os.remove(txt)
+                os.remove(idx)
+
+    if _args.export is not None:
+        if os.path.isdir(_args.export):
+            shutil.copy(opinions_file, _args.export)
+            shutil.copy(index_file, _args.export)
+        else:
+            logging.error(f'No export to ProphetNet as {_args.export} is not a folder.')
+            return
 
 
 def create_sample_dataset():
@@ -189,7 +223,7 @@ def create_sample_dataset():
     :return:
     """
     logging.info('Extract a random sample of opinions')
-    logging.info(f'utils.Opinion Dataset: {_args.path}')
+    logging.info(f'Opinion Dataset: {_args.path}')
     logging.info(f'Extract to: {_args.dest}')
     logging.info(f'Nb samples: {_args.num_samples}')
 
@@ -237,6 +271,26 @@ def create_sample_dataset():
         todo.append({'ids': citing_opinion_ids, 'filename': 'sample_citing.parq'})
 
     _ = list(map(lambda x: _collect_opinions(x['ids'], _dest_file(x['filename'])), todo))
+
+
+def create_summary_dataset():
+    @utils.queue_worker
+    def worker_summary(x: pa.RecordBatch) -> int:
+        """
+        Create a summary of opinions.
+
+        :param x: a batch of opinions
+        :return: number of processed records
+        """
+        df = pd.DataFrame([{'opinion_id': opinion.opinion_id,
+                            f'summary_{_args.method}': utils.summarization_methods[_args.method](opinion.raw_text)}
+                           for opinion in opinions_in_arrowbatch(x)])
+        file_out = os.path.join(_args.dest, f'{utils.random_name()}.parq')
+        df.to_parquet(file_out)
+        return x.num_rows
+
+    logging.info(f'Create SUMMARIES of utils.Opinions')
+    _transform_parquet_dataset(worker_summary)
 
 
 def verify_sample():
@@ -381,7 +435,7 @@ def parse_args(argstxt=None):
         description='Verify a random sample, to make sure all opinions cited from within the core sample are located '
                     'in the cited dataset.')
     parser_verify.add_argument('--core', type=str, help='Path to the PARQUET file with the CORE sample')
-    parser_verify.add_argument('--cited', type=str, help='Path to the PARUET file with the CITED sample')
+    parser_verify.add_argument('--cited', type=str, help='Path to the PARQUET file with the CITED sample')
     parser_verify.add_argument('--clean', default=False, action='store_true', help='Clean the CORE sample (will '
                                                                                    'overwrite its PARQUET file')
     parser_verify.set_defaults(func=verify_sample)
@@ -406,6 +460,13 @@ def parse_args(argstxt=None):
     )
     parser_summary.add_argument('--method', type=str, choices=utils.summarization_methods.keys(), default='textrank',
                                 help='Summarization method.')
+
+    # Produce data for fairseq
+    parser_prophet = default_parser(name='prophetnet',
+                                    description='Generate file for ProphetNet summarization',
+                                    func=create_prophetnet)
+    parser_prophet.add_argument('--export', type=str, help='Copy the generated data into the ProphetNet folder for '
+                                                           'original data')
 
     return parser.parse_args(argstxt)
 
