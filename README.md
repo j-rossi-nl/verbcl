@@ -1,6 +1,9 @@
 # Court Listener
 Working with CourtListener dataset.
 
+# Python Conda Environment
+`conda env create -f environment.yml` will create an environment named `courtlistener`.
+
 # Parquet Dataset
 Throughout the program, datasets will be stored as PARQUET dataset.
 
