@@ -10,6 +10,7 @@ import pyarrow.dataset as ds
 import pyarrow.parquet as pq
 import requests
 import tarfile
+import spacy
 import shutil
 import sys
 
@@ -17,15 +18,19 @@ import utils
 
 from argparse import ArgumentParser, Namespace
 from nltk.tokenize import sent_tokenize
+from pymongo import MongoClient
 from pyspin.spin import make_spin, Default
-from typing import Any, Callable, Optional
+from typing import Any, Callable
 from tqdm import tqdm
 
-from courtlistener import Opinion, OpinionDataset, opinions_in_arrowbatch
+from courtlistener import Opinion, opinions_in_arrowbatch
+
+# Deeper recursion for BeautifulSoup
+max_recursion = 100000
+sys.setrecursionlimit(max_recursion)
 
 # Configure
 utils.config()
-
 
 # The arguments of the command are presented as a global module variable, so all functions require no arguments
 _args: Namespace = Namespace()
@@ -96,6 +101,62 @@ def create_citation_map():
 
     logging.info('Create CITATION MAP')
     _transform_parquet_dataset(worker_extract_citation_map)
+
+
+def create_extsumm_dataset():
+    """
+    EXTSumm needs 1 input JSON file and 1 label JSON file per opinion.
+    :return:
+    """
+    nlp: spacy.language.Language = spacy.load('en_core_web_sm')
+    nlp.max_length = 1e7   # Safe, we do not use parser / NER
+
+    input_folder = os.path.join(_args.dest, 'inputs')
+    label_folder = os.path.join(_args.dest, 'labels')
+
+    os.makedirs(input_folder, exist_ok=True)
+    os.makedirs(label_folder, exist_ok=True)
+
+    @utils.queue_worker
+    def worker_extsumm(x: pa.RecordBatch):
+        for opinion in opinions_in_arrowbatch(x):
+            try:
+                doc = nlp(opinion.raw_text)
+
+                inputs = [
+                    {
+                        'text': str(s),
+                        'tokens': [str(t) for t in s],
+                        'sentence_id': i,
+                        'word_count': len(s)
+                    } for i, s in enumerate(doc.sents)
+                ]
+
+                js_input = {
+                    'id': str(opinion.opinion_id),
+                    'inputs': inputs,
+                    'section_names': ['document'],
+                    'section_lengths': [len(inputs)]
+                }
+
+                js_label = {
+                    'id': str(opinion.opinion_id),
+                    'labels': [0] * len(inputs)
+                }
+
+                input_file = os.path.join(input_folder, f'{opinion.opinion_id}.json')
+                label_file = os.path.join(label_folder, f'{opinion.opinion_id}.json')
+
+                json.dump(js_input, open(input_file, 'w'))
+                json.dump(js_label, open(label_file, 'w'))
+            except Exception as e:
+                logging.error(f'Could not process opinion {opinion.opinion_id}: {e}')
+                continue
+
+        return x.num_rows
+
+    logging.info(f'Create EXTSUMM of Opinions')
+    _transform_parquet_dataset(worker_extsumm)
 
 
 def create_opinion_dataset():
@@ -289,8 +350,63 @@ def create_summary_dataset():
         df.to_parquet(file_out)
         return x.num_rows
 
-    logging.info(f'Create SUMMARIES of utils.Opinions')
+    logging.info(f'Create SUMMARIES of Opinions')
     _transform_parquet_dataset(worker_summary)
+
+
+def create_verbatim_dataset():
+    """
+    Extract potential verbatim quotes from opinions. The candidates are spans of text in between quotation marks
+    located around citations.
+
+    :return:
+    """
+    @utils.queue_worker
+    def worker_verbatim(x: pa.RecordBatch) -> int:
+        data = []
+        for opinion in opinions_in_arrowbatch(x):
+            for verbatim in opinion.verbatim(max_words_before_after=_args.max_words_extract,
+                                             min_words_verbatim=_args.min_verbatim_size):
+                data.append({k: verbatim[k] for k in ['citing_opinion_id', 'cited_opinion_id', 'verbatim']})
+
+        if len(data) > 0:
+            # No empty files
+            df = pd.DataFrame(data)
+            file_out = os.path.join(_args.dest, f'{utils.random_name()}.parq')
+            df.to_parquet(file_out)
+        return x.num_rows
+
+    logging.info(f'Extract potential Verbatim quotes')
+    _transform_parquet_dataset(worker_verbatim)
+
+
+def parquet_to_mongodb():
+    """
+    Take the dataset in PATH and export it entirely to the mongodb collection.
+    The schema of the dataset is used as a basis for the document structure.
+
+    :return:
+    """
+    @utils.queue_worker
+    def worker_export(x: pa.RecordBatch) -> int:
+        client = MongoClient(host=_args.host, port=_args.port)
+        db = client[_args.db]
+        collection = db[_args.collection]
+
+        d = x.to_pydict()
+        samples = []
+        for sample in zip(*(d.values())):
+            sample_d = {k: v for k, v in zip(d.keys(), sample)}
+            samples.append(sample_d)
+
+        collection.insert_many(samples)
+        client.close()
+        return x.num_rows
+
+    _args.dest = '/tmp'   # workaround
+    logging.info('Move data to MongoDB')
+    logging.info(f'Host: {_args.host}, DB: {_args.db}, Collection: {_args.collection}')
+    _transform_parquet_dataset(worker_export)
 
 
 def verify_sample():
@@ -329,7 +445,7 @@ def verify_sample():
 def download_courtlistener_opinions_bulk():
     url = "https://www.courtlistener.com/api/bulk-data/opinions/all.tar"
 
-    block_size = 1024  # 1 Kibibyte
+    block_size = 1024  # 1 Kilobyte
     now = datetime.date.today()
     filename = os.path.join(_args.to, f'{now.strftime("%Y%m%d")}_opinion.tar')
 
@@ -358,9 +474,6 @@ def download_courtlistener_opinions_bulk():
             for m in tqdm(tar.getmembers()):
                 tar.extract(m, path=_args.to)
     _unpack()
-
-
-_cited_dataset: Optional[OpinionDataset] = None
 
 
 def parse_args(argstxt=None):
@@ -449,7 +562,7 @@ def parse_args(argstxt=None):
         func=create_annotation_dataset
     )
     parser_doccano.add_argument('--max-words-extract', type=int, help='Limit the text around the citation '
-                                                                      'itself to a number of characters')
+                                                                      'itself to a number of words')
 
     # Produce a summary of opinions
     parser_summary = default_parser(
@@ -467,6 +580,40 @@ def parse_args(argstxt=None):
                                     func=create_prophetnet)
     parser_prophet.add_argument('--export', type=str, help='Copy the generated data into the ProphetNet folder for '
                                                            'original data')
+
+    # Extract verbatim quotes
+    parser_verbatim = default_parser(
+        name='verbatim',
+        description='From an opinion PARQUET dataset located in folder PATH, generate a dataset of potential verbatim'
+                    'quotes, which are spans of text between quotation marks close to citations.',
+        func=create_verbatim_dataset
+    )
+    parser_verbatim.add_argument('--max-words-extract', type=int, help='Limit the text around the citation '
+                                                                       'itself to a number of words')
+    parser_verbatim.add_argument('--min-verbatim-size', type=int, help='Do not consider quotes that contain less than'
+                                                                       'the minimum number of words')
+
+    # Prepare for extsumm summarization
+    _ = default_parser(
+        name='extsumm',
+        description='From an opinion PARQUET dataset located in folder PATH, generate the input data for the EXTSumm '
+                    'summarizer. See https://github.com/Wendy-Xiao/Extsumm_local_global_context. Each opinion will '
+                    'generate a JSON file for inputs, and a JSON file for labels. In the folder DEST, subfolders '
+                    'inputs and labels are created. The labels are all 0, so the dataset can not be used for training',
+        func=create_extsumm_dataset
+    )
+
+    # Export data to MongoDB
+    parser_mongodb = default_parser(
+        name='mongodb',
+        description='Export all the data from the dataset in PATH to the MONGODB instance hosted on host HOST'
+                    'to the DB and COLLECTION.',
+        func=parquet_to_mongodb
+    )
+    parser_mongodb.add_argument('--host', type=str, default='localhost', help='MongoDB Host')
+    parser_mongodb.add_argument('--port', type=int, default=27017, help='MongoDb port')
+    parser_mongodb.add_argument('--db', type=str, help='MongoDB database')
+    parser_mongodb.add_argument('--collection', type=str, help='MongoDB collection')
 
     return parser.parse_args(argstxt)
 

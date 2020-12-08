@@ -1,8 +1,10 @@
+import functools
+import logging
+import time
 import tqdm
 import threading
-import functools
 
-from multiprocessing import Pool, Queue
+from multiprocessing import current_process, Pool, Queue
 from typing import Callable, Iterator, Any
 
 
@@ -23,9 +25,15 @@ def queue_worker(func):
         :return:
         """
         while True:
+            logging.debug(f'{current_process()}: Wait in_queue')
             x = in_queue.get(True)
+            logging.debug(f'{current_process()}: Got in_queue')
+            start = time.time()
             out = func(x)
-            out_queue.put(out)
+            end = time.time()
+            logging.debug(f'{current_process()}: Finished batch in {end - start:.1f}s')
+            out_queue.put(out, block=True, timeout=1)
+            logging.debug(f'{current_process()}: result in out_queue')
 
     return wrapper
 
@@ -62,7 +70,10 @@ def multiprocess(worker_fn: Callable[[Queue, Queue], None],
     # Fill in the "to do" queue in a separate thread
     def _fill_todo_queue():
         for x in input_iterator_fn():
+            logging.debug(f'Adding to IN-Queue')
             todo_queue.put(x)
+            logging.debug(f' added to IN-Queue')
+        logging.debug(f'All samples in IN-Queue')
 
     fillin = threading.Thread(target=_fill_todo_queue)
     fillin.start()

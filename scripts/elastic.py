@@ -1,19 +1,19 @@
-import sys
-import os
-import logging
-import logging.config
 import elasticsearch
+import logging
+import os
+import pandas as pd
 import pyarrow as pa
 import pyarrow.dataset as ds
-import pandas as pd
+import sys
+import time
 
 import utils
 
-from elasticsearch_dsl import connections
-from elasticsearch_dsl import Document, Integer, Text
-from elasticsearch_dsl import analyzer
 from argparse import ArgumentParser, Namespace
 from dotenv import load_dotenv
+from elasticsearch import RequestError
+from elasticsearch_dsl import analyzer, connections, Document, Integer, Text
+from multiprocessing import current_process
 from typing import Any
 
 from courtlistener import opinions_in_arrowbatch
@@ -65,41 +65,41 @@ def search_verbatims():
     @utils.queue_worker
     def _search(x: pa.RecordBatch) -> int:
         data = []
-        for opinion in opinions_in_arrowbatch(x):
-            for verbatim in opinion.verbatim(max_words_before_after=_args.max_words_extract,
-                                             min_words_verbatim=_args.min_verbatim):
+        batch: pd.DataFrame = x.to_pandas()
+        for _, d in batch.iterrows():
+            d: pd.Series
+            full = d['verbatim']
+            first_10 = ' '.join(full.split(' ')[:10])
+            last_10 = ' '.join(full.split(' ')[-10:])
 
-                full = verbatim['verbatim']
-                first_10 = ' '.join(full.split(' ')[:10])
-                last_10 = ' '.join(full.split(' ')[-10:])
-
-                # Using INTERVALS query
-                # Looking for the whole verbatim, the first 10 words, the last 10 words
-                raw_text_query = {
-                    'any_of': {
-                        'intervals': [
-                            {'match': {'query': full, 'ordered': True, 'max_gaps': 10}},
-                            {'match': {'query': first_10, 'ordered': True, 'max_gaps': 2}},
-                            {'match': {'query': last_10, 'ordered': True, 'max_gaps': 2}}
-                        ]
-                    }
+            # Using INTERVALS query
+            # Looking for the whole verbatim, the first 10 words, the last 10 words
+            raw_text_query = {
+                'any_of': {
+                    'intervals': [
+                        {'match': {'query': full, 'ordered': True, 'max_gaps': 10}},
+                        {'match': {'query': first_10, 'ordered': True, 'max_gaps': 2}},
+                        {'match': {'query': last_10, 'ordered': True, 'max_gaps': 2}}
+                    ]
                 }
-                s = OpinionDocument.search(). \
-                    query("match", opinion_id=verbatim['cited_opinion_id']). \
-                    query("intervals", raw_text=raw_text_query). \
-                    params(filter_path=['hits.hits._score'])
+            }
+            s = OpinionDocument.search(). \
+                query("match", opinion_id=d['cited_opinion_id']). \
+                query("intervals", raw_text=raw_text_query). \
+                params(filter_path=['hits.hits._score'])
+            try:
                 results = s.execute()
-                try:
-                    score = results[0].meta.score
-                except (KeyError, IndexError):
-                    # The search did not return any result at all
-                    # The PARAMS restrain the query to ONE document, and the INTERVALS queries will dismiss
-                    # documents that do not match the rules.
-                    # So this happens when the alledged verbatim does not appear in the cited opinion
-                    score = -1
+                score = results[0].meta.score
+            except (RequestError, KeyError, IndexError):
+                # The search did not return any result at all
+                # The PARAMS restrain the query to ONE document, and the INTERVALS queries will dismiss
+                # documents that do not match the rules.
+                # So this happens when the alledged verbatim does not appear in the cited opinion
+                score = -1
+            except:
+                score = -1
 
-                _ = verbatim.pop('span_in_snippet')
-                data.append({**verbatim, 'score': float(score)})
+            data.append({**(d.to_dict()), 'score': float(score)})
 
         if len(data) > 0:
             file_out = os.path.join(_args.dest, f'{utils.random_name()}.parq')
@@ -108,9 +108,11 @@ def search_verbatims():
         return x.num_rows
 
     logging.info(f'Processing the dataset in {_args.path}')
+    logging.info(f'Destination {_args.dest}')
+    utils.make_clean_folder(_args.dest)
     dataset: Any = ds.dataset(_args.path)
     dataset: ds.FileSystemDataset
-    iterator, nb_rows = utils.parquet_dataset_iterator(dataset=dataset, batch_size=8)
+    iterator, nb_rows = utils.parquet_dataset_iterator(dataset=dataset, batch_size=128)
     utils.multiprocess(worker_fn=_search, input_iterator_fn=iterator, total=nb_rows,
                        nb_workers=_args.num_workers, description='Search Verbatims')
 

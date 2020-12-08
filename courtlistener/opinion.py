@@ -114,15 +114,18 @@ class Opinion:
                                                                    nb_words=max_words_before_after)
 
             # Find all verbatim quote in the text before the citation
-            for m in filter(lambda x: len(x['quote'].split()) >= min_words_verbatim,
-                            self.verbatim_quote.finditer(snippet_txt[:-len_after])):
-                yield {
-                    'citing_opinion_id': self.opinion_id,
-                    'cited_opinion_id': citation['cited_opinion_id'],
-                    'verbatim': m['quote'],
-                    'snippet': snippet_txt,
-                    'span_in_snippet': m.span()
-                }
+            try:
+                for m in filter(lambda x: len(x['quote'].split()) >= min_words_verbatim,
+                                self.verbatim_quote.finditer(snippet_txt[:-len_after])):
+                    yield {
+                        'citing_opinion_id': self.opinion_id,
+                        'cited_opinion_id': citation['cited_opinion_id'],
+                        'verbatim': m['quote'],
+                        'snippet': snippet_txt,
+                        'span_in_snippet': m.span()
+                    }
+            except RecursionError:
+                continue
 
     def __len__(self):
         return self.num_words
