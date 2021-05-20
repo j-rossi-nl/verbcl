@@ -79,7 +79,7 @@ def multiprocess(worker_fn: Callable[[Queue, Queue], None],
     fillin.start()
 
     # Use the "done" queue to monitor process
-    with tqdm.tqdm(desc=description, total=total) as pbar:
+    with tqdm.tqdm(desc=description, total=total, smoothing=0.1) as pbar:
         while pbar.n < pbar.total:
             results: int = done_queue.get(True)
             pbar.update(n=results)

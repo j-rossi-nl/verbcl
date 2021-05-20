@@ -21,6 +21,13 @@ utils.config()
 _args: Namespace = Namespace()
 
 
+@make_spin(Default, 'Querying MongoDB...')
+def query_complete_collection(collection) -> Tuple[Cursor, int]:
+    _num_rows = collection.count_documents({})
+    _cursor = collection.find({})
+    return _cursor, _num_rows
+
+
 def evaluate_summaries():
     @utils.queue_worker
     def worker_evaluate_ngram_cosine(x: List[Dict[str, Any]]) -> int:
@@ -125,14 +132,7 @@ def evaluate_summaries():
     }
 
     with MongoClient(_args.mongodb) as client:
-        @make_spin(Default, 'Querying MongoDB...')
-        def _query() -> Tuple[Cursor, int]:
-            collection = client[_args.db][_args.eval]
-            _num_rows = collection.count_documents({})
-            _cursor = collection.find({})
-            return _cursor, _num_rows
-
-        cursor, num_rows = _query()
+        cursor, num_rows = query_complete_collection(collection=client[_args.db][_args.eval])
         cursor_iterator_fn = utils.mongodb_cursor_iterator(cursor=cursor,
                                                            batch_size=_args.batch_size)
         utils.multiprocess(worker_fn=workers[_args.metric],
@@ -173,14 +173,7 @@ def merge_verbatims():
         return len(x)
 
     with MongoClient(_args.mongodb) as client:
-        @make_spin(Default, 'Querying MongoDB...')
-        def _query() -> Tuple[Cursor, int]:
-            collection = client[_args.db][_args.verbatim]
-            _num_rows = collection.count_documents({})
-            _cursor = collection.find({})
-            return _cursor, _num_rows
-
-        cursor, num_rows = _query()
+        cursor, num_rows = query_complete_collection(collection=client[_args.db][_args.verbatim])
         cursor_iterator_fn = utils.mongodb_cursor_iterator(cursor=cursor,
                                                            batch_size=_args.batch_size)
         utils.multiprocess(worker_fn=worker_merge,
@@ -232,7 +225,7 @@ def parse_args(argstxt=None):
     parser_evaluate.add_argument('--dest', type=str, help='Destination Folder for the results')
     parser_evaluate.add_argument('--eval', type=str, help='Collection name of the summaries being evaluated')
     parser_evaluate.add_argument('--eval-field', type=str, help='Name of the field with the summaries in the evaluated'
-                                                                 'collection')
+                                                                'collection')
     parser_evaluate.add_argument('--metric', type=str, choices=['rouge', 'ngrams-cos'])
 
     return parser.parse_args(argstxt)

@@ -70,11 +70,17 @@ _LOGCONFIG = {
             "stream": "ext://sys.stderr",
             "level": "INFO",
             "formatter": "default"
+        },
+        "file": {
+            "class": "logging.FileHandler",
+            "filename": "application.log",
+            "level": "DEBUG",
+            "formatter": "default"
         }
     },
     "root": {
         "level": "INFO",
-        "handlers": ["console"]
+        "handlers": ["console", "file"]
     }
 }
 

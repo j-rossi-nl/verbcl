@@ -41,6 +41,7 @@ def main():
         tmp = os.path.join('/tmp', random_name())
         with open(tmp, 'w') as f:
             f.write(d['html_with_citations'][0])
+        print(f'Opinion written in {tmp}')
         webbrowser.open_new_tab(f'file://{tmp}')
 
 
