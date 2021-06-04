@@ -21,12 +21,26 @@ def parquet_dataset_iterator(dataset: ds.FileSystemDataset, batch_size: Optional
     return _iterator, nb_rows
 
 
-def file_list_iterator(files: List[str]) -> Tuple[Callable[[], Iterator[Any]], int]:
+def list_iterator(items: List[Any]) -> Tuple[Callable[[], Iterator[Any]], int]:
     def _iterator():
-        for f in files:
+        for f in items:
             yield f
 
-    return _iterator, len(files)
+    return _iterator, len(items)
+
+
+def batch_iterator(items: List[Any], batch_size: int) -> Tuple[Callable[[], Iterator[Any]], int]:
+    list_iter_fn, _ = list_iterator(items)
+    list_iter = list_iter_fn()
+
+    def _iterator():
+        while True:
+            batch = [x for _, x in zip(range(batch_size), list_iter)]
+            yield batch
+            if len(batch) < batch_size:
+                break
+
+    return _iterator, len(items)
 
 
 def mongodb_cursor_iterator(cursor: Union[CommandCursor, Cursor], batch_size: Optional[int] = None) -> \
@@ -56,4 +70,4 @@ def make_clean_folder(path):
     """
     if os.path.exists(path):
         shutil.rmtree(path)
-        os.makedirs(path, exist_ok=True)
+    os.makedirs(path, exist_ok=True)

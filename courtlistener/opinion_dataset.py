@@ -58,5 +58,5 @@ def opinions_in_arrowbatch(x: pa.RecordBatch) -> Iterator[Opinion]:
     :return: Opinion objects
     """
     d = x.to_pydict()
-    for citing_opinion_id, opinion_html in zip(d['opinion_id'], d['html_with_citations']):
-        yield Opinion(opinion_id=citing_opinion_id, opinion_html=opinion_html)
+    for opinion_id, opinion_html in zip(d['opinion_id'], d['html_with_citations']):
+        yield Opinion(opinion_id=opinion_id, opinion_html=opinion_html)

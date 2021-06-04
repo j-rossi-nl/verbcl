@@ -1,3 +1,4 @@
+import csv
 import datetime
 import glob
 import json
@@ -14,23 +15,25 @@ import spacy
 import shutil
 import sys
 
-import utils
-
 from argparse import ArgumentParser, Namespace
 from nltk.tokenize import sent_tokenize
 from pymongo import MongoClient
 from pyspin.spin import make_spin, Default
-from typing import Any, Callable
+from typing import Any, Callable, List
 from tqdm import tqdm
 
 from courtlistener import Opinion, opinions_in_arrowbatch
+from utils import config, gather_by_opinion_ids, list_iterator, multiprocess, parquet_dataset_iterator, \
+    queue_worker, random_name, summarizer
+from utils import OpinionDocument
+
 
 # Deeper recursion for BeautifulSoup
 max_recursion = 100000
 sys.setrecursionlimit(max_recursion)
 
 # Configure
-utils.config()
+config()
 
 # The arguments of the command are presented as a global module variable, so all functions require no arguments
 _args: Namespace = Namespace()
@@ -45,12 +48,12 @@ def _transform_parquet_dataset(worker_fn):
     dataset: Any = ds.dataset(_args.path)
     dataset: ds.FileSystemDataset  # we are sure of the actual class
 
-    iterator, nb_rows = utils.parquet_dataset_iterator(dataset, batch_size=_args.batch_size)
-    utils.multiprocess(worker_fn=worker_fn,
-                       input_iterator_fn=iterator,
-                       total=nb_rows,
-                       nb_workers=_args.num_workers,
-                       description='Progress')
+    iterator, nb_rows = parquet_dataset_iterator(dataset, batch_size=_args.batch_size)
+    multiprocess(worker_fn=worker_fn,
+                 input_iterator_fn=iterator,
+                 total=nb_rows,
+                 nb_workers=_args.num_workers,
+                 description='Progress')
 
 
 def create_annotation_dataset():
@@ -58,12 +61,13 @@ def create_annotation_dataset():
     Uses an opinion dataset and create the text snippets that will be manually annotated.
     The output is a collection of TXT files.
     """
-    @utils.queue_worker
+
+    @queue_worker
     def worker_jsonl_for_annotation(x: pa.RecordBatch) -> int:
         """
         Extract the text to be annotated for anchor extraction.
         """
-        file_out = os.path.join(_args.dest, f'{utils.random_name()}.json')
+        file_out = os.path.join(_args.dest, f'{random_name()}.json')
         with open(file_out, 'w', encoding='utf-8') as out:
             out.write('\n'.join(j for op in opinions_in_arrowbatch(x)
                                 for j in op.doccano(max_words_before_after=_args.max_words_extract)))
@@ -75,7 +79,7 @@ def create_annotation_dataset():
 
 
 def create_citation_map():
-    @utils.queue_worker
+    @queue_worker
     def worker_extract_citation_map(x: pa.RecordBatch) -> int:
         """
         Get a list of 2-uple citing_opinion / cited_opinion.
@@ -94,7 +98,7 @@ def create_citation_map():
             df[c] = df[c].apply(pd.to_numeric)
 
         if len(df) > 0:
-            file_out = os.path.join(_args.dest, f'{utils.random_name()}.parq')
+            file_out = os.path.join(_args.dest, f'{random_name()}.parq')
             df.to_parquet(file_out)
 
         return x.num_rows
@@ -109,7 +113,7 @@ def create_extsumm_dataset():
     :return:
     """
     nlp: spacy.language.Language = spacy.load('en_core_web_sm')
-    nlp.max_length = 1e7   # Safe, we do not use parser / NER
+    nlp.max_length = 1e7  # Safe, we do not use parser / NER
 
     input_folder = os.path.join(_args.dest, 'inputs')
     label_folder = os.path.join(_args.dest, 'labels')
@@ -117,7 +121,7 @@ def create_extsumm_dataset():
     os.makedirs(input_folder, exist_ok=True)
     os.makedirs(label_folder, exist_ok=True)
 
-    @utils.queue_worker
+    @queue_worker
     def worker_extsumm(x: pa.RecordBatch):
         for opinion in opinions_in_arrowbatch(x):
             try:
@@ -165,7 +169,8 @@ def create_opinion_dataset():
 
     :return:
     """
-    @utils.queue_worker
+
+    @queue_worker
     def worker_extract_opinion(x: str) -> int:
         """
         Open a targz file, go through all contained JSON files, without extracting to disk, and in each file, extract
@@ -213,12 +218,12 @@ def create_opinion_dataset():
     os.makedirs(_args.dest, exist_ok=True)
 
     targz_files = glob.glob(os.path.join(_args.path, '*.tar.gz'))
-    iterator, nb_files = utils.file_list_iterator(targz_files)
-    utils.multiprocess(worker_fn=worker_extract_opinion,
-                       input_iterator_fn=iterator,
-                       total=nb_files,
-                       nb_workers=_args.num_workers,
-                       description='Extract opinion XML from archives')
+    iterator, nb_files = list_iterator(targz_files)
+    multiprocess(worker_fn=worker_extract_opinion,
+                 input_iterator_fn=iterator,
+                 total=nb_files,
+                 nb_workers=_args.num_workers,
+                 description='Extract opinion XML from archives')
 
 
 def create_prophetnet():
@@ -229,7 +234,8 @@ def create_prophetnet():
     Refer to https://github.com/microsoft/ProphetNet for further instructions
     :return:
     """
-    @utils.queue_worker
+
+    @queue_worker
     def worker_prepare_prophetnet(x: pa.RecordBatch) -> int:
         texts = []
         ids = []
@@ -238,7 +244,7 @@ def create_prophetnet():
             texts.append(full_text)
             ids.append(str(opinion.opinion_id))
 
-        fout = os.path.join(_args.dest, utils.random_name())
+        fout = os.path.join(_args.dest, random_name())
         fout_txt = fout + '.txt'
         fout_idx = fout + '.idx'
 
@@ -255,7 +261,7 @@ def create_prophetnet():
 
     # Gather all txt files into 1 and prepare the index
     txts = glob.glob(os.path.join(_args.dest, '*.txt'))
-    idxs = [x[:-4]+'.idx' for x in txts]
+    idxs = [x[:-4] + '.idx' for x in txts]
 
     opinions_file = os.path.join(_args.dest, 'opinions.txt')
     index_file = os.path.join(_args.dest, 'opinions.idx')
@@ -283,12 +289,21 @@ def create_sample_dataset():
 
     :return:
     """
+    assert _args.opinion_ids is None or _args.citation_map is None, \
+        "Please provide a citation map OR a list of opinion ids"
+    assert not (_args.add_cited or _args.add_citing) or _args.citation_map, \
+        "Please provide a citation map when using the options add_cited or add_citing"
+
     logging.info('Extract a random sample of opinions')
     logging.info(f'Opinion Dataset: {_args.path}')
     logging.info(f'Extract to: {_args.dest}')
-    logging.info(f'Nb samples: {_args.num_samples}')
 
     os.makedirs(_args.dest, exist_ok=True)
+    @make_spin(Default, f"Loading dataset in {_args.path}...")
+    def _load_dataset():
+        return ds.dataset(_args.path)
+
+    dataset = _load_dataset()
 
     def _collect_opinions(opinion_ids: np.ndarray,
                           file_out: str):
@@ -306,21 +321,31 @@ def create_sample_dataset():
     def _dest_file(name: str) -> str:
         return os.path.join(_args.dest, name)
 
-    logging.info('Load citation map...')
-    citation_path = _args.citation_map
-    assert os.path.isdir(citation_path) or os.path.isfile(citation_path)
-    if os.path.isdir(citation_path):
-        citation_map = ds.dataset(citation_path).to_table().to_pandas()
-    else:
-        citation_map = pd.read_csv(_args.citation_map)
-    dataset = ds.dataset(_args.path)
+    # Rid of warnings
+    citation_map = pd.DataFrame()
 
-    logging.info('Random sample...')
-    pool_opinion_ids = citation_map['citing_opinion_id'].unique()
+    if _args.citation_map is not None:
+        logging.info('Load citation map...')
+        citation_path = _args.citation_map
+        assert os.path.isdir(citation_path) or os.path.isfile(citation_path)
+        if os.path.isdir(citation_path):
+            citation_map = ds.dataset(citation_path).to_table().to_pandas()
+        else:
+            citation_map = pd.read_csv(_args.citation_map)
 
     todo = []
-    sample_opinion_ids: np.ndarray = np.random.choice(a=pool_opinion_ids, size=_args.num_samples, replace=False)
+
+    if _args.opinion_ids is not None:
+        logging.info(f"Reading file {_args.opinion_ids}")
+        with open(_args.opinion_ids) as csv:
+            sample_opinion_ids: np.ndarray = np.array(list(map(lambda x: int(x.strip()), csv.readlines())))
+    else:
+        logging.info(f'Random sample of {_args.num_samples}')
+        pool_opinion_ids = citation_map['citing_opinion_id'].unique()
+        sample_opinion_ids: np.ndarray = np.random.choice(a=pool_opinion_ids, size=_args.num_samples, replace=False)
+
     todo.append({'ids': sample_opinion_ids, 'filename': 'sample_core.parq'})
+    logging.info(f"Number of samples in CORE: {sample_opinion_ids.shape[0]}")
 
     if _args.add_cited:
         cited_opinion_ids = citation_map[citation_map['citing_opinion_id'].isin(sample_opinion_ids)]['cited_opinion_id']
@@ -335,7 +360,9 @@ def create_sample_dataset():
 
 
 def create_summary_dataset():
-    @utils.queue_worker
+    summarizer_fn = summarizer(method=_args.method, nb_sentences=_args.nb_sentences)
+
+    @queue_worker
     def worker_summary(x: pa.RecordBatch) -> int:
         """
         Create a summary of opinions.
@@ -344,9 +371,9 @@ def create_summary_dataset():
         :return: number of processed records
         """
         df = pd.DataFrame([{'opinion_id': opinion.opinion_id,
-                            f'summary_{_args.method}': utils.summarization_methods[_args.method](opinion.raw_text)}
+                            f'summary_{_args.method}': summarizer_fn(opinion.raw_text)}
                            for opinion in opinions_in_arrowbatch(x)])
-        file_out = os.path.join(_args.dest, f'{utils.random_name()}.parq')
+        file_out = os.path.join(_args.dest, f'{random_name()}.parq')
         df.to_parquet(file_out)
         return x.num_rows
 
@@ -361,7 +388,8 @@ def create_verbatim_dataset():
 
     :return:
     """
-    @utils.queue_worker
+
+    @queue_worker
     def worker_verbatim(x: pa.RecordBatch) -> int:
         data = []
         for opinion in opinions_in_arrowbatch(x):
@@ -372,7 +400,7 @@ def create_verbatim_dataset():
         if len(data) > 0:
             # No empty files
             df = pd.DataFrame(data)
-            file_out = os.path.join(_args.dest, f'{utils.random_name()}.parq')
+            file_out = os.path.join(_args.dest, f'{random_name()}.parq')
             df.to_parquet(file_out)
         return x.num_rows
 
@@ -387,7 +415,8 @@ def parquet_to_mongodb():
 
     :return:
     """
-    @utils.queue_worker
+
+    @queue_worker
     def worker_export(x: pa.RecordBatch) -> int:
         client = MongoClient(host=_args.host, port=_args.port)
         db = client[_args.db]
@@ -403,7 +432,7 @@ def parquet_to_mongodb():
         client.close()
         return x.num_rows
 
-    _args.dest = '/tmp'   # workaround
+    _args.dest = '/tmp'  # workaround
     logging.info('Move data to MongoDB')
     logging.info(f'Host: {_args.host}, DB: {_args.db}, Collection: {_args.collection}')
     _transform_parquet_dataset(worker_export)
@@ -453,7 +482,7 @@ def download_courtlistener_opinions_bulk():
     response = requests.get(url, stream=True)
     total_size_in_bytes = int(response.headers.get('content-length', 0))
 
-    logging.info(f'Download Court Listener utils.Opinion dataset, from URL {url}')
+    logging.info(f'Download Court Listener Opinion dataset, from URL {url}')
     logging.info(f'Destination file: {filename}')
     with tqdm(total=total_size_in_bytes, unit='iB', unit_scale=True) as progress_bar:
         with open(filename, 'wb') as file:
@@ -473,7 +502,24 @@ def download_courtlistener_opinions_bulk():
         with tarfile.open(filename, 'r') as tar:
             for m in tqdm(tar.getmembers()):
                 tar.extract(m, path=_args.to)
+
     _unpack()
+
+
+def get_opinions():
+    logging.info(f"Read Opinion IDs in {_args.path}")
+    with open(_args.path) as csvfile:
+        reader = csv.reader(csvfile)
+        opinion_ids = [int(row[0]) for row in reader]
+
+    logging.info(f"Found {len(opinion_ids)} Opinion ID")
+    df: pd.DataFrame = gather_by_opinion_ids(class_=OpinionDocument,
+                                             opinion_ids=opinion_ids,
+                                             envfile=_args.env,
+                                             nb_workers=_args.num_workers,
+                                             batch_size=_args.batch_size)
+    df.to_parquet(_args.dest)
+    logging.info(f"{df.shape[0]} Opinions saved into {_args.dest}")
 
 
 def parse_args(argstxt=None):
@@ -498,7 +544,7 @@ def parse_args(argstxt=None):
         new_parser.set_defaults(func=func)
         return new_parser
 
-    # Download the utils.Opinion dataset from CourtListener
+    # Download the Opinion dataset from CourtListener
     # Unpack it if requested
     parser_download = subparsers.add_parser('download')
     parser_download.add_argument('--to', type=str, help='Download folder')
@@ -535,6 +581,7 @@ def parse_args(argstxt=None):
     )
     parser_sample.add_argument('--citation-map', type=str, help='CSV File of the citation map')
     parser_sample.add_argument('--num-samples', type=int, default=10000, help='Number of samples')
+    parser_sample.add_argument('--opinion-ids', type=str, help='CSV file with list of opinion ids.')
     parser_sample.add_argument('--add-cited', default=False, action='store_true',
                                help='Add all the opinions that are cited by an opinion in the random sample. '
                                     'The size of the final sample will be larger than the argument --num-samples')
@@ -571,8 +618,9 @@ def parse_args(argstxt=None):
                     'opinion, using one of the available methods.',
         func=create_summary_dataset
     )
-    parser_summary.add_argument('--method', type=str, choices=utils.summarization_methods.keys(), default='textrank',
+    parser_summary.add_argument('--method', type=str, choices=["textrank"], default='textrank',
                                 help='Summarization method.')
+    parser_summary.add_argument('--nb-sentences', type=int, default=10, help="Number of sentences in the summary.")
 
     # Produce data for fairseq
     parser_prophet = default_parser(name='prophetnet',
@@ -614,6 +662,19 @@ def parse_args(argstxt=None):
     parser_mongodb.add_argument('--port', type=int, default=27017, help='MongoDb port')
     parser_mongodb.add_argument('--db', type=str, help='MongoDB database')
     parser_mongodb.add_argument('--collection', type=str, help='MongoDB collection')
+
+    # Extract a list of opinions from ElasticSearch
+    parser_opinions = subparsers.add_parser(
+        name='get-opinions',
+        description='Get a batch of opinions based on a list of opinion ids'
+    )
+    parser_opinions.add_argument('--path', type=str, help='Path to CSV file with list of opinion ids')
+    parser_opinions.add_argument('--dest', type=str, help='Path of PARQUET file where the requested opinions will be'
+                                                          'stored')
+    parser_opinions.add_argument('--env', type=str, help='Path to ELASTIC env file')
+    parser_opinions.add_argument('--num-workers', type=int, default=4, help='Number of parallel workers')
+    parser_opinions.add_argument('--batch-size', type=int, default=32, help='Batch size')
+    parser_opinions.set_defaults(func=get_opinions)
 
     return parser.parse_args(argstxt)
 
