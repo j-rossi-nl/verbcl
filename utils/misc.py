@@ -1,13 +1,17 @@
+import json
+import glob
+import logging
 import os
 import pyarrow.dataset as ds
 import pyarrow.parquet as pq
 import random
 import shutil
 import string
+import tqdm
 
 from pymongo.command_cursor import CommandCursor
 from pymongo.cursor import Cursor
-from typing import Callable, Iterator, Any, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, Iterator, Iterable, List, Optional, Tuple, Union
 
 
 def parquet_dataset_iterator(dataset: ds.FileSystemDataset, batch_size: Optional[int] = None) -> \
@@ -23,10 +27,36 @@ def parquet_dataset_iterator(dataset: ds.FileSystemDataset, batch_size: Optional
 
 def list_iterator(items: List[Any]) -> Tuple[Callable[[], Iterator[Any]], int]:
     def _iterator():
-        for f in items:
-            yield f
+        yield from items
 
     return _iterator, len(items)
+
+
+def batch_iterator_from_sliceable(items: Any, batch_size: int) -> Callable[[], Iterator[Any]]:
+    def _iterator():
+        batch_id = 0
+        while True:
+            logging.info("Get one batch")
+            batch = items[batch_id * batch_size: (batch_id + 1) * batch_size]
+            if len(batch) > 0:
+                yield batch
+                if len(batch) < batch_size:
+                    break
+            batch_id += 1
+
+    return _iterator
+
+
+def batch_iterator_from_iterable(items: Iterable[Any], batch_size: int) -> Callable[[], Iterator[Any]]:
+    def _iterator():
+        while True:
+            logging.info("Get one batch")
+            batch = [x for _, x in zip(range(batch_size), items)]
+            yield batch
+            if len(batch) < batch_size:
+                break
+
+    return _iterator
 
 
 def batch_iterator(items: List[Any], batch_size: int) -> Tuple[Callable[[], Iterator[Any]], int]:
@@ -71,3 +101,17 @@ def make_clean_folder(path):
     if os.path.exists(path):
         shutil.rmtree(path)
     os.makedirs(path, exist_ok=True)
+
+
+def write_jsonl(data: List[Dict[Any, Any]], path: str, append: bool = False) -> None:
+    mode = "a" if append else "w"
+    with open(path, mode) as out:
+        for d in data:
+            out.write(json.dumps(d) + "\n")
+
+
+def read_jsonl(path: str) -> List[Any]:
+    with open(path) as src:
+        data = [json.loads(line) for line in src]
+
+    return data

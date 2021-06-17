@@ -9,7 +9,7 @@ from typing import Callable, Dict, List, Union
 
 class CustomNLP:
     def __init__(self):
-        self.nlp = spacy.load("en_core_web_sm", exclude=["ner", "tagger", "lemmatizer", "attribute_ruler"])
+        self.nlp = spacy.load("en_core_web_sm")
         self.nlp.add_pipe("textrank")
         self.nlp.max_length = 4e6
 
