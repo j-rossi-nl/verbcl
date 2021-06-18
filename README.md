@@ -41,3 +41,6 @@ The data is available: [Here](https://doi.org/10.21942/uva.14798878.v1).
   month={Jun} 
 } 
 ```
+## Contact
+
+For questions and inquiries, contact: [Julien Rossi](mailto:j.rossi@uva.nl)
