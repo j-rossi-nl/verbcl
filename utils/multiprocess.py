@@ -53,9 +53,9 @@ def multiprocess(worker_fn: QueueWorker,
     """
     BASED ON MULTIPROCESSING. Any underlying shared object should be resistant to fork().
     Another kind of multiprocessing with progress bar. It uses Queue to keep track of progress.
-    It goes over a full pyarrrow dataset, ie a folder with Parquet files
-    The worker is implemented in worker_fn, a function that receives 2 queues, an in_queue and an out_queue. The
-    expected behavior of the worker is: read from in_queue, process the data, put it in out_queue (1 for 1)
+    The worker is implemented in worker_fn, a function that receives 2 queues, an in_queue and an out_queue.
+    The expected behavior of the worker is: read from in_queue, process the data, put it in out_queue (1 for 1)
+    See @queue_worker
 
     :param worker_fn: the worker function. It gets an in_queue and and out_queue.
     :param input_iterator_fn: an iterator over input data for the process
