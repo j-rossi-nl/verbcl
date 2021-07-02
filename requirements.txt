@@ -97,7 +97,7 @@ py-rouge==1.1
 pyarrow==1.0.1
 pycparser==2.19
 pydantic==1.7.4
-Pygments==2.6.1
+Pygments==2.7.4
 pymongo==3.11.1
 pyOpenSSL==19.1.0
 pyparsing==2.4.7
