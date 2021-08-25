@@ -19,7 +19,7 @@ from argparse import ArgumentParser, Namespace
 from nltk.tokenize import sent_tokenize
 from pymongo import MongoClient
 from pyspin.spin import make_spin, Default
-from typing import Any, Callable, List
+from typing import Any, Callable
 from tqdm import tqdm
 
 from courtlistener import Opinion, opinions_in_arrowbatch

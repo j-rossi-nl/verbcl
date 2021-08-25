@@ -5,7 +5,21 @@ Here is the dataset from the paper:
 >
 > J. Rossi, S. Vakulenko, E. Kanoulas, 2021
 
-## Download the Data
+## Build the Python Environment
+
+We use `poetry` as dependency manager.
+
+* Install `poetry` with `pip install poetry`
+* Install dependencies with `poetry install`
+* Install torch:
+  * `CPU` version with `poetry run poe cpu`
+  * `GPU CUDA 10.2` with `poetry run poe cuda102`
+  * `GPU CUDA 11.1` with `poetry run poe cuda111`
+
+This will create a new virtual environment. 
+* Enter a shell where the environment is activated: `poetry shell`
+
+## Download the VerbCL Data
 
 The data is available: [Here](https://doi.org/10.21942/uva.14798878.v1).
 
@@ -22,9 +36,17 @@ The data is available: [Here](https://doi.org/10.21942/uva.14798878.v1).
 
 * Using the persistence API of `elasticsearch-dsl` in this [notebook](notebooks/Tutorial_Using_Data.ipynb)
 
+# Reproduce the Paper
 
-## Citation
-### Paper
+(tbd)
+All these steps can be executed with our code:
+1. Download court listener 
+2. Prepare the dataset
+3. Run baselines
+
+
+# Citation
+## Paper
 
 Our paper is accepted at CIKM 2021, Resource Track.
 
@@ -32,8 +54,8 @@ Our paper is accepted at CIKM 2021, Resource Track.
 * Pre-Print available on [ArXiv](https://arxiv.org/abs/2108.10120)
 
 
-### Dataset
-```latex
+## Dataset
+```
 @misc{rossi-vakulenko-kanoulas-2021, 
   title={VerbCL Dataset}, 
   url={https://uvaauas.figshare.com/articles/dataset/VerbCL\_Dataset/14798878/1}, 
@@ -45,6 +67,6 @@ Our paper is accepted at CIKM 2021, Resource Track.
   month={Jun} 
 } 
 ```
-## Contact
+# Contact
 
 For questions and inquiries, contact: [Julien Rossi](mailto:j.rossi@uva.nl)

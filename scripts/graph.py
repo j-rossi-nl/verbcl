@@ -27,6 +27,7 @@ def chunks(l, n):
 def betweenness_centrality_parallel(G, processes=None):
     """Parallel betweenness centrality  function"""
     p = Pool(processes=processes)
+    # noinspection PyUnresolvedReferences
     node_divisor = len(p._pool) * 4
     node_chunks = list(chunks(G.nodes(), int(G.order() / node_divisor)))
     num_chunks = len(node_chunks)

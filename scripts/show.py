@@ -24,6 +24,7 @@ def main():
             continue
 
         opid = int(user_input)
+        # noinspection PyUnresolvedReferences
         scan_tasks = dataset.scan(filter=ds.field('opinion_id') == opid)
         batches = sum((list(s.execute()) for s in scan_tasks), [])
         # noinspection PyArgumentList

@@ -1,5 +1,4 @@
 import json
-import glob
 import logging
 import os
 import pyarrow.dataset as ds
@@ -7,7 +6,6 @@ import pyarrow.parquet as pq
 import random
 import shutil
 import string
-import tqdm
 
 from pymongo.command_cursor import CommandCursor
 from pymongo.cursor import Cursor
@@ -17,6 +15,7 @@ from typing import Any, Callable, Dict, Iterator, Iterable, List, Optional, Tupl
 def parquet_dataset_iterator(dataset: ds.FileSystemDataset, batch_size: Optional[int] = None) -> \
         Tuple[Callable[[], Iterator[Any]], int]:
     def _iterator():
+        # noinspection PyUnresolvedReferences
         for scan_task in dataset.scan(batch_size=1024 if batch_size is None else batch_size):
             for batch in scan_task.execute():
                 yield batch

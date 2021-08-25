@@ -2,7 +2,7 @@
 import pytextrank
 import spacy
 
-from nltk.tokenize import word_tokenize, sent_tokenize
+from nltk.tokenize import sent_tokenize
 from spacy.tokens import Doc
 from typing import Callable, Dict, List, Union
 

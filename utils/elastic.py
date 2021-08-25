@@ -15,6 +15,7 @@ from typing import Any, List, Type
 from .misc import batch_iterator, make_clean_folder, random_name
 from .multiprocess import queue_worker, multiprocess
 
+# noinspection PyUnresolvedReferences
 elasticsearch.logger.setLevel(logging.WARNING)
 
 

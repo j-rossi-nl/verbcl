@@ -178,12 +178,14 @@ class _WinColorStreamHandler(logging.StreamHandler):
     def __init__(self, stream=None):
         logging.StreamHandler.__init__(self, stream)
         # get file handle for the stream
+        # noinspection PyUnresolvedReferences
         import ctypes, ctypes.util
         # for some reason find_msvcrt() sometimes doesn't find msvcrt.dll on my system?
         crtname = ctypes.util.find_msvcrt()
         if not crtname:
             crtname = ctypes.util.find_library("msvcrt")
         crtlib = ctypes.cdll.LoadLibrary(crtname)
+        # noinspection PyUnresolvedReferences
         self._outhdl = crtlib._get_osfhandle(self.stream.fileno())
 
     def emit(self, record):

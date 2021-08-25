@@ -1,0 +1,41 @@
+[tool.poetry]
+name = "verbcl"
+version = "0.1.0"
+description = ""
+authors = ["Julien ROSSI <j.rossi@uva.nl>"]
+
+[tool.poetry.dependencies]
+python = ">=3.7.1,<3.10"
+pandas = "^1.3.2"
+scipy = "^1.7.1"
+scikit-learn = "^0.24.2"
+tqdm = "^4.62.2"
+transformers = "^4.9.2"
+elasticsearch = "^7.14.0"
+pyarrow = "^5.0.0"
+python-dotenv = "^0.19.0"
+elasticsearch-dsl = "^7.4.0"
+pyspin = "^1.1.1"
+pymongo = "^3.12.0"
+py-rouge = "^1.1"
+networkx = "^2.6.2"
+nltk = "^3.6.2"
+numpy = "^1.21.2"
+requests = "^2.26.0"
+spacy = "^3.1.2"
+pytextrank = "^3.2.1"
+poethepoet = "^0.10.0"
+beautifulsoup4 = "^4.9.3"
+en-core-web-md = {url = "https://github.com/explosion/spacy-models/releases/download/en_core_web_md-3.1.0/en_core_web_md-3.1.0.tar.gz"}
+
+[tool.poetry.dev-dependencies]
+ipython = "^7.26.0"
+
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.poe.tasks]
+cpu     = "pip install torch==1.9.0+cpu -f https://download.pytorch.org/whl/torch_stable.html"
+cuda102 = "pip install torch"
+cuda111 = "pip install torch==1.9.0+cu111 -f https://download.pytorch.org/whl/torch_stable.html"
