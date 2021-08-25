@@ -25,8 +25,12 @@ The data is available: [Here](https://doi.org/10.21942/uva.14798878.v1).
 
 ## Citation
 ### Paper
-* Paper still under review
-* Expected Release Date: Begin September 2021
+
+Our paper is accepted at CIKM 2021, Resource Track.
+
+* DOI: [10.1145/3459637.3482021](https://doi.org/10.1145/3459637.3482021)
+* Pre-Print available on [ArXiv](https://arxiv.org/abs/2108.10120)
+
 
 ### Dataset
 ```latex

@@ -140,3 +140,5 @@ cython_debug/
 # Own folders
 /data/
 /.idea/
+/paper/
+/.vscode/
